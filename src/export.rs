@@ -6,8 +6,8 @@ use std::{
 
 use crate::models::{Ingredient, RecipeDetail, Tag, TagKind};
 
-/// A layout built into the executable. Every template must define the same
-/// macros (see `templates/a5_vertical_split.sty`).
+/// A layout built into the executable. Every template must pass
+/// `template_check::check_template` (enforced by `build.rs` and tests).
 pub struct Template {
     pub name: &'static str,
     pub style: &'static str,
@@ -21,11 +21,11 @@ pub const TEMPLATES: &[Template] = &[Template {
 /// File name under which the chosen template is saved next to the `.tex`.
 pub const STYLE_FILE_NAME: &str = "platex.sty";
 
-/// Writes the cookbook to `tex_path` and the template as `platex.sty` beside it.
-pub fn write_cookbook(tex_path: &Path, template: &Template, recipes: &[RecipeDetail]) -> io::Result<PathBuf> {
+/// Writes the cookbook to `tex_path` and the template `style` as `platex.sty` beside it.
+pub fn write_cookbook(tex_path: &Path, style: &str, recipes: &[RecipeDetail]) -> io::Result<PathBuf> {
     let style_path = tex_path.with_file_name(STYLE_FILE_NAME);
     fs::write(tex_path, render_cookbook(recipes))?;
-    fs::write(&style_path, template.style)?;
+    fs::write(&style_path, style)?;
     Ok(style_path)
 }
 
@@ -140,9 +140,12 @@ pub fn render_recipe(detail: &RecipeDetail) -> String {
     out
 }
 
-/// Renders a complete cookbook. Recipes without a chapter come first, then
-/// each chapter (by chapter order) with its recipes. Recipes are sorted by name;
-/// a recipe with several chapters appears in each of them.
+/// Chapter at the end of the cookbook holding all recipes without a chapter.
+pub const OTHER_CHAPTER_NAME: &str = "Sonstige";
+
+/// Renders a complete cookbook: each chapter (by chapter order) with its
+/// recipes, then recipes without a chapter under `OTHER_CHAPTER_NAME`.
+/// Recipes are sorted by name; a recipe with several chapters appears in each.
 pub fn render_cookbook(recipes: &[RecipeDetail]) -> String {
     let mut sorted = recipes.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|detail| detail.recipe.name.to_lowercase());
@@ -168,15 +171,20 @@ pub fn render_cookbook(recipes: &[RecipeDetail]) -> String {
     writeln!(out).unwrap();
     writeln!(out, r"\begin{{document}}").unwrap();
 
-    for detail in sorted.iter().filter(|detail| !has_chapter(detail, None)) {
-        writeln!(out).unwrap();
-        out.push_str(&render_recipe(detail));
-    }
-
     for chapter in chapters {
         writeln!(out).unwrap();
         writeln!(out, r"\Kapitel{{{}}}", escape_latex(&chapter.name)).unwrap();
         for detail in sorted.iter().filter(|detail| has_chapter(detail, Some(&chapter.id))) {
+            writeln!(out).unwrap();
+            out.push_str(&render_recipe(detail));
+        }
+    }
+
+    let without_chapter = sorted.iter().filter(|detail| !has_chapter(detail, None)).collect::<Vec<_>>();
+    if !without_chapter.is_empty() {
+        writeln!(out).unwrap();
+        writeln!(out, r"\Kapitel{{{}}}", OTHER_CHAPTER_NAME).unwrap();
+        for detail in without_chapter {
             writeln!(out).unwrap();
             out.push_str(&render_recipe(detail));
         }
@@ -309,13 +317,14 @@ mod tests {
         let rendered = render_cookbook(&recipes);
         let order = [
             r"\begin{document}",
-            r"\begin{Rezept}{Brot}",
             r"\Kapitel{Hauptgerichte}",
             r"\begin{Rezept}{Auflauf}",
             r"\begin{Rezept}{Eintopf}",
             r"\Kapitel{Suppen}",
             r"\begin{Rezept}{Eintopf}",
             r"\begin{Rezept}{Tomatensuppe}",
+            r"\Kapitel{Sonstige}",
+            r"\begin{Rezept}{Brot}",
             r"\end{document}",
         ];
         let mut position = 0;
@@ -323,8 +332,14 @@ mod tests {
             let found = rendered[position..].find(needle).unwrap_or_else(|| panic!("missing {needle}"));
             position += found + needle.len();
         }
-        assert_eq!(rendered.matches(r"\Kapitel{").count(), 2);
+        assert_eq!(rendered.matches(r"\Kapitel{").count(), 3);
         assert!(rendered.starts_with("\\documentclass[a5paper]{article}\n\\usepackage{platex}\n"));
+    }
+
+    #[test]
+    fn render_cookbook_omits_other_chapter_when_all_recipes_have_chapters() {
+        let rendered = render_cookbook(&[recipe("Suppe", vec![tag("c1", "Suppen", TagKind::Chapter, 0)])]);
+        assert!(!rendered.contains(r"\Kapitel{Sonstige}"));
     }
 
     #[test]
@@ -333,7 +348,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let tex_path = dir.join("book.tex");
 
-        let style_path = write_cookbook(&tex_path, &TEMPLATES[0], &[recipe("Brot", vec![])]).unwrap();
+        let style_path = write_cookbook(&tex_path, TEMPLATES[0].style, &[recipe("Brot", vec![])]).unwrap();
 
         assert_eq!(style_path, dir.join("platex.sty"));
         assert!(fs::read_to_string(&tex_path).unwrap().contains(r"\begin{Rezept}{Brot}"));
@@ -342,28 +357,37 @@ mod tests {
     }
 
     #[test]
-    fn every_template_defines_every_emitted_macro() {
+    fn every_built_in_template_passes_check() {
         for template in TEMPLATES {
-            assert_template_defines_macros(template);
+            assert_eq!(crate::template_check::check_template(template.style), Ok(()), "{}", template.name);
         }
     }
 
-    fn assert_template_defines_macros(template: &Template) {
-        assert!(template.style.contains(r"\ProvidesPackage{platex}"), "{}: wrong package name", template.name);
-        for name in [
-            r"\newcommand{\Kapitel}",
-            r"\newenvironment{Rezept}",
-            r"\newcommand{\RezeptInfo}",
-            r"\newcommand{\Beschreibung}",
-            r"\newenvironment{Zutaten}",
-            r"\newenvironment{Zutatengruppe}",
-            r"\newcommand{\Zutat}",
-            r"\newcommand{\OptionaleZutat}",
-            r"\newenvironment{Zubereitung}",
-            r"\newcommand{\Schritt}",
-            r"\newcommand{\OptionalerSchritt}",
-        ] {
-            assert!(template.style.contains(name), "{} is missing {name}", template.name);
+    #[test]
+    fn check_covers_every_macro_the_export_emits() {
+        let mut detail = recipe("Suppe", vec![tag("c1", "Suppen", TagKind::Chapter, 0)]);
+        detail.recipe.servings = Some(2);
+        detail.recipe.description = Some("Warm".to_string());
+        detail.ingredients = vec![
+            ingredient(Some("Base"), Some("1"), None, "Wasser", false),
+            ingredient(None, None, None, "Salz", true),
+        ];
+        detail.steps = vec![step("Kochen.", false), step("Salzen.", true)];
+        let rendered = render_cookbook(&[detail]);
+
+        let standard = ["documentclass", "usepackage", "begin", "end"];
+        for token in rendered.split('\\').skip(1) {
+            let name = token.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>();
+            if name.is_empty() || standard.contains(&name.as_str()) {
+                continue;
+            }
+            assert!(crate::template_check::REQUIRED_COMMANDS.contains(&name.as_str()), "\\{name} is not checked");
+        }
+        for token in rendered.split(r"\begin{").skip(1) {
+            let name = &token[..token.find('}').unwrap()];
+            if name != "document" {
+                assert!(crate::template_check::REQUIRED_ENVIRONMENTS.contains(&name), "{name} is not checked");
+            }
         }
     }
 }

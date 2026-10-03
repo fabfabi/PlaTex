@@ -287,7 +287,21 @@ pub struct App {
     tags: Vec<TagEntry>,
     new_tag_name: String,
     new_tag_kind: TagKind,
-    template_index: usize,
+    show_latex_export: bool,
+    template_choice: TemplateChoice,
+    uploaded_template: Option<UploadedTemplate>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemplateChoice {
+    BuiltIn(usize),
+    Uploaded,
+}
+
+/// A user-provided `.sty` that passed `template_check::check_template`.
+struct UploadedTemplate {
+    file_name: String,
+    style: String,
 }
 
 impl App {
@@ -303,7 +317,9 @@ impl App {
             tags: Vec::new(),
             new_tag_name: String::new(),
             new_tag_kind: TagKind::Content,
-            template_index: 0,
+            show_latex_export: false,
+            template_choice: TemplateChoice::BuiltIn(0),
+            uploaded_template: None,
         };
         app.refresh_tags();
 
@@ -495,14 +511,88 @@ impl App {
             Ok::<_, sqlx::Error>(details)
         });
 
-        let template = &crate::export::TEMPLATES[self.template_index];
+        let style = match self.template_choice {
+            TemplateChoice::BuiltIn(index) => crate::export::TEMPLATES[index].style,
+            TemplateChoice::Uploaded => match &self.uploaded_template {
+                Some(template) => template.style.as_str(),
+                None => {
+                    self.status = "Upload a template first.".to_string();
+                    return;
+                }
+            },
+        };
         self.status = match details {
-            Ok(details) => match crate::export::write_cookbook(&path, template, &details) {
+            Ok(details) => match crate::export::write_cookbook(&path, style, &details) {
                 Ok(style_path) => format!("Exported LaTeX to {} and {}", path.display(), style_path.display()),
                 Err(err) => format!("Export failed: {err}"),
             },
             Err(err) => format!("Export failed: {err}"),
         };
+    }
+
+    fn upload_template(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("LaTeX style", &["sty"]).pick_file() else {
+            return;
+        };
+
+        let style = match fs::read_to_string(&path) {
+            Ok(style) => style,
+            Err(err) => {
+                self.status = format!("Could not read template: {err}");
+                return;
+            }
+        };
+
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match crate::template_check::check_template(&style) {
+            Ok(()) => {
+                self.status = format!("Template {} is valid.", file_name);
+                self.uploaded_template = Some(UploadedTemplate { file_name, style });
+                self.template_choice = TemplateChoice::Uploaded;
+            }
+            Err(missing) => {
+                self.status = format!("Template {} is missing: {}", file_name, missing.join(", "));
+            }
+        }
+    }
+
+    fn show_latex_export_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_latex_export;
+        let mut export = false;
+        egui::Window::new("Export LaTeX")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Template");
+                for (index, template) in crate::export::TEMPLATES.iter().enumerate() {
+                    ui.radio_value(&mut self.template_choice, TemplateChoice::BuiltIn(index), template.name);
+                }
+                ui.horizontal(|ui| {
+                    let label = match &self.uploaded_template {
+                        Some(template) => format!("Uploaded: {}", template.file_name),
+                        None => "Uploaded: none".to_string(),
+                    };
+                    ui.add_enabled_ui(self.uploaded_template.is_some(), |ui| {
+                        ui.radio_value(&mut self.template_choice, TemplateChoice::Uploaded, label);
+                    });
+                    if ui.button("Upload .sty").clicked() {
+                        self.upload_template();
+                    }
+                });
+                ui.separator();
+                ui.label("Chapters follow the order defined in Manage tags.");
+                export = ui.button("Export").clicked();
+                ui.label(format!("Status: {}", self.status));
+            });
+
+        if export {
+            self.export_latex_file();
+        }
+        self.show_latex_export = open;
     }
 
     fn import_json_file(&mut self) {
@@ -721,6 +811,8 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.show_latex_export_window(ctx);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
@@ -849,16 +941,8 @@ impl eframe::App for App {
                             self.export_json_file();
                         }
 
-                        let templates = crate::export::TEMPLATES;
-                        egui::ComboBox::from_id_salt("latex_template")
-                            .selected_text(templates[self.template_index].name)
-                            .show_ui(ui, |ui| {
-                                for (index, template) in templates.iter().enumerate() {
-                                    ui.selectable_value(&mut self.template_index, index, template.name);
-                                }
-                            });
-                        if ui.button("Export LaTeX").clicked() {
-                            self.export_latex_file();
+                        if ui.button("Export LaTeX...").clicked() {
+                            self.show_latex_export = true;
                         }
                     });
 

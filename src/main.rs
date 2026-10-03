@@ -1,6 +1,7 @@
 mod db;
 mod export;
 mod models;
+mod template_check;
 mod ui;
 
 use std::sync::Arc;
