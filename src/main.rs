@@ -2,6 +2,8 @@ mod db;
 mod models;
 mod ui;
 
+use std::sync::Arc;
+
 fn main() -> eframe::Result<()> {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
@@ -25,13 +27,14 @@ fn main() -> eframe::Result<()> {
         Ok(pool) => pool,
         Err(err) => panic!("Failed to initialize database: {err}"),
     };
+    let pool = Arc::new(pool);
 
-    let recipe_count = runtime
-        .block_on(async { db::list_recipes(&pool).await.unwrap_or_default().len() });
+    let recipes = runtime
+        .block_on(async { db::list_recipe_summaries(&pool).await.unwrap_or_default() });
 
     eframe::run_native(
         "PlaTex",
         eframe::NativeOptions::default(),
-        Box::new(|_cc| Ok(Box::new(ui::App::new(recipe_count)))),
+        Box::new(move |_cc| Ok(Box::new(ui::App::new(pool.clone(), recipes.clone())))),
     )
 }
