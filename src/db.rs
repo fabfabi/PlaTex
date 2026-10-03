@@ -1,6 +1,6 @@
 use sqlx::SqlitePool;
 
-use crate::models::{Ingredient, Recipe, RecipeTag, Step, Tag};
+use crate::models::{Ingredient, Recipe, Step, Tag};
 
 pub async fn connect_db(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     SqlitePool::connect(database_url).await
@@ -111,8 +111,8 @@ pub async fn list_ingredients_for_recipe(
         WHERE recipe_id = ?
         ORDER BY sort_order
         "#,
-        recipe_id,
     )
+    .bind(recipe_id)
     .fetch_all(pool)
     .await?;
 
@@ -130,8 +130,8 @@ pub async fn list_steps_for_recipe(
         WHERE recipe_id = ?
         ORDER BY sort_order
         "#,
-        recipe_id,
     )
+    .bind(recipe_id)
     .fetch_all(pool)
     .await?;
 
@@ -150,8 +150,8 @@ pub async fn list_tags_for_recipe(
         WHERE rt.recipe_id = ?
         ORDER BY t.name
         "#,
-        recipe_id,
     )
+    .bind(recipe_id)
     .fetch_all(pool)
     .await?;
 
@@ -181,4 +181,123 @@ pub async fn insert_recipe(
     .await?;
 
     Ok(result.last_insert_rowid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn init_db_creates_required_tables() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let tables = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+            AND name IN ('recipes', 'tags', 'recipe_tags', 'ingredients', 'steps')
+            ORDER BY name
+            "#,
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(tables.len(), 5);
+        assert!(tables.iter().any(|name| name == "recipes"));
+        assert!(tables.iter().any(|name| name == "tags"));
+        assert!(tables.iter().any(|name| name == "recipe_tags"));
+        assert!(tables.iter().any(|name| name == "ingredients"));
+        assert!(tables.iter().any(|name| name == "steps"));
+    }
+
+    #[tokio::test]
+    async fn insert_recipe_and_list_recipes_works() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let recipe_id = insert_recipe(
+            &pool,
+            "Tomato Pasta",
+            Some("Simple weeknight pasta."),
+            Some(2),
+            Some(10),
+            Some(15),
+        )
+        .await
+        .unwrap();
+
+        let recipes = list_recipes(&pool).await.unwrap();
+
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].id, recipe_id);
+        assert_eq!(recipes[0].name, "Tomato Pasta");
+        assert_eq!(recipes[0].servings, Some(2));
+        assert_eq!(recipes[0].prep_time_minutes, Some(10));
+        assert_eq!(recipes[0].cook_time_minutes, Some(15));
+    }
+
+    #[tokio::test]
+    async fn recipe_related_data_can_be_fetched() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let recipe_id = insert_recipe(
+            &pool,
+            "Pancakes",
+            Some("Breakfast pancakes."),
+            Some(4),
+            Some(15),
+            Some(10),
+        )
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO tags (name) VALUES ('breakfast'), ('quick');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, 1), (?, 2);",
+        )
+        .bind(recipe_id)
+        .bind(recipe_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO ingredients (recipe_id, group_name, quantity, unit, ingredient_name, optional, sort_order) VALUES (?, 'Base', '2', 'cups', 'flour', 0, 1), (?, 'Base', '1', 'cup', 'milk', 0, 2);",
+        )
+        .bind(recipe_id)
+        .bind(recipe_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO steps (recipe_id, step_number, instruction, optional, sort_order) VALUES (?, 1, 'Mix ingredients.', 0, 1), (?, 2, 'Cook on pan.', 0, 2);",
+        )
+        .bind(recipe_id)
+        .bind(recipe_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let ingredients = list_ingredients_for_recipe(&pool, recipe_id).await.unwrap();
+        let steps = list_steps_for_recipe(&pool, recipe_id).await.unwrap();
+        let tags = list_tags_for_recipe(&pool, recipe_id).await.unwrap();
+
+        assert_eq!(ingredients.len(), 2);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(ingredients[0].ingredient_name, "flour");
+        assert_eq!(steps[1].instruction, "Cook on pan.");
+        assert!(tags.iter().any(|tag| tag.name == "breakfast"));
+    }
 }
