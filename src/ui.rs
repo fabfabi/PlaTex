@@ -4,6 +4,8 @@ use chrono::Local;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+use crate::models::{Tag, TagKind};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct IngredientItem {
     id: u64,
@@ -35,6 +37,19 @@ struct RecipeDraft {
     cook_minutes: String,
     groups: Vec<IngredientGroup>,
     steps: Vec<PreparationStep>,
+    tag_ids: HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TagEntry {
+    tag: Tag,
+    edit_name: String,
+}
+
+enum TagAction {
+    Rename(String, String),
+    Delete(String),
+    MoveChapter(usize, i32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,13 +92,188 @@ struct JsonRecipe {
     cook_time_minutes: Option<i64>,
     ingredients: Vec<JsonIngredient>,
     steps: Vec<JsonStep>,
+    /// Uuids of the recipe's tags, referring to `JsonExportDocument::tags`.
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct JsonTag {
+    uuid: String,
+    name: String,
+    kind: TagKind,
+    sort_order: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct JsonExportDocument {
     version: u32,
     exported_at: String,
+    #[serde(default)]
+    tags: Vec<JsonTag>,
     recipes: Vec<JsonRecipe>,
+}
+
+async fn build_export_document(pool: &sqlx::SqlitePool) -> Result<JsonExportDocument, String> {
+    let tags = crate::db::list_tags(pool)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|tag| JsonTag {
+            uuid: tag.id,
+            name: tag.name,
+            kind: tag.kind,
+            sort_order: tag.sort_order,
+        })
+        .collect();
+
+    let recipes = crate::db::list_recipes(pool).await.map_err(|err| err.to_string())?;
+    let mut exported = Vec::new();
+
+    for recipe in recipes {
+        let detail = crate::db::load_recipe_detail(pool, &recipe.id).await.map_err(|err| err.to_string())?;
+        let ingredients = detail
+            .ingredients
+            .into_iter()
+            .map(|ingredient| JsonIngredient {
+                group_name: ingredient.group_name,
+                quantity_unit: match (ingredient.quantity, ingredient.unit) {
+                    (Some(quantity), Some(unit)) => format!("{} {}", quantity, unit),
+                    (Some(quantity), None) => quantity,
+                    (None, Some(unit)) => unit,
+                    (None, None) => String::new(),
+                },
+                description: ingredient.ingredient_name,
+                optional: ingredient.optional,
+            })
+            .collect();
+
+        let steps = detail
+            .steps
+            .into_iter()
+            .map(|step| JsonStep {
+                instruction: step.instruction,
+                optional: step.optional,
+            })
+            .collect();
+
+        exported.push(JsonRecipe {
+            uuid: Some(recipe.id.clone()),
+            name: recipe.name,
+            description: recipe.description,
+            servings: recipe.servings,
+            prep_time_minutes: recipe.prep_time_minutes,
+            cook_time_minutes: recipe.cook_time_minutes,
+            ingredients,
+            steps,
+            tags: detail.tags.into_iter().map(|tag| tag.id).collect(),
+        });
+    }
+
+    Ok(JsonExportDocument {
+        version: 2,
+        exported_at: Local::now().to_rfc3339(),
+        tags,
+        recipes: exported,
+    })
+}
+
+/// Imports tags and recipes, both matched by uuid. `OnlyAddNew` skips entries
+/// whose uuid already exists; `OverwriteChanges` replaces them, including the
+/// recipe's tag assignments. Returns the number of imported recipes.
+async fn import_document(
+    pool: &sqlx::SqlitePool,
+    document: JsonExportDocument,
+    mode: ImportMode,
+) -> Result<usize, String> {
+    let existing_tag_ids = crate::db::list_tags(pool)
+        .await
+        .map_err(|err| format!("Could not load existing tags: {err}"))?
+        .into_iter()
+        .map(|tag| tag.id)
+        .collect::<HashSet<_>>();
+
+    for tag in &document.tags {
+        if tag.uuid.trim().is_empty() {
+            continue;
+        }
+        if mode == ImportMode::OnlyAddNew && existing_tag_ids.contains(&tag.uuid) {
+            continue;
+        }
+        crate::db::upsert_tag(pool, &tag.uuid, &tag.name, tag.kind, tag.sort_order)
+            .await
+            .map_err(|err| format!("Could not import tag {}: {err}", tag.name))?;
+    }
+
+    let known_tag_ids = crate::db::list_tags(pool)
+        .await
+        .map_err(|err| format!("Could not load tags: {err}"))?
+        .into_iter()
+        .map(|tag| tag.id)
+        .collect::<HashSet<_>>();
+
+    let existing_ids = crate::db::list_recipes(pool)
+        .await
+        .map_err(|err| format!("Could not load existing recipes: {err}"))?
+        .into_iter()
+        .map(|recipe| recipe.id)
+        .collect::<HashSet<_>>();
+
+    let mut imported = 0usize;
+    for recipe in document.recipes {
+        let recipe_uuid = recipe.uuid.as_deref().filter(|value| !value.trim().is_empty());
+        if mode == ImportMode::OnlyAddNew && recipe_uuid.is_some_and(|uuid| existing_ids.contains(uuid)) {
+            continue;
+        }
+
+        let groups = recipe
+            .ingredients
+            .iter()
+            .map(|ingredient| crate::db::IngredientGroupInput {
+                group_name: ingredient.group_name.clone(),
+                quantity_unit: ingredient.quantity_unit.clone(),
+                description: ingredient.description.clone(),
+                optional: ingredient.optional,
+            })
+            .collect::<Vec<_>>();
+
+        let steps = recipe
+            .steps
+            .iter()
+            .map(|step| crate::db::StepInput {
+                instruction: step.instruction.clone(),
+                optional: step.optional,
+            })
+            .collect::<Vec<_>>();
+
+        let tag_ids = recipe
+            .tags
+            .iter()
+            .filter(|tag_id| known_tag_ids.contains(*tag_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let saved = crate::db::upsert_recipe_with_details(
+            pool,
+            recipe_uuid,
+            &recipe.name,
+            recipe.description.as_deref(),
+            recipe.servings,
+            recipe.prep_time_minutes,
+            recipe.cook_time_minutes,
+            &groups,
+            &steps,
+        )
+        .await;
+
+        if let Ok(id) = saved {
+            if crate::db::set_recipe_tags(pool, &id, &tag_ids).await.is_ok() {
+                imported += 1;
+            }
+        }
+    }
+
+    Ok(imported)
 }
 
 pub struct App {
@@ -94,6 +284,9 @@ pub struct App {
     status: String,
     next_id: u64,
     import_mode: ImportMode,
+    tags: Vec<TagEntry>,
+    new_tag_name: String,
+    new_tag_kind: TagKind,
 }
 
 impl App {
@@ -106,7 +299,11 @@ impl App {
             status: "Ready".to_string(),
             next_id: 1,
             import_mode: ImportMode::OverwriteChanges,
+            tags: Vec::new(),
+            new_tag_name: String::new(),
+            new_tag_kind: TagKind::Content,
         };
+        app.refresh_tags();
 
         app.recipe.groups.push(IngredientGroup {
             id: app.next_id,
@@ -155,6 +352,85 @@ impl App {
             .collect();
     }
 
+    fn refresh_tags(&mut self) {
+        let pool = self.pool.clone();
+        let tags = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { crate::db::list_tags(&pool).await.unwrap_or_default() });
+
+        self.tags = tags
+            .into_iter()
+            .map(|tag| TagEntry {
+                edit_name: tag.name.clone(),
+                tag,
+            })
+            .collect();
+    }
+
+    fn chapter_ids(&self) -> Vec<String> {
+        self.tags
+            .iter()
+            .filter(|entry| entry.tag.kind == TagKind::Chapter)
+            .map(|entry| entry.tag.id.clone())
+            .collect()
+    }
+
+    fn add_tag(&mut self) {
+        let name = self.new_tag_name.trim().to_string();
+        if name.is_empty() {
+            self.status = "Tag name is required.".to_string();
+            return;
+        }
+
+        let pool = self.pool.clone();
+        let kind = self.new_tag_kind;
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { crate::db::create_tag(&pool, &name, kind).await });
+
+        match result {
+            Ok(_) => {
+                self.new_tag_name.clear();
+                self.status = format!("Added tag: {}", name);
+            }
+            Err(error) => self.status = format!("Add tag failed: {error}"),
+        }
+        self.refresh_tags();
+    }
+
+    fn apply_tag_action(&mut self, action: TagAction) {
+        let pool = self.pool.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = match action {
+            TagAction::Rename(tag_id, name) => {
+                if name.trim().is_empty() {
+                    self.status = "Tag name is required.".to_string();
+                    self.refresh_tags();
+                    return;
+                }
+                runtime.block_on(async { crate::db::rename_tag(&pool, &tag_id, &name).await })
+            }
+            TagAction::Delete(tag_id) => {
+                self.recipe.tag_ids.remove(&tag_id);
+                runtime.block_on(async { crate::db::delete_tag(&pool, &tag_id).await })
+            }
+            TagAction::MoveChapter(index, direction) => {
+                let mut chapter_ids = self.chapter_ids();
+                let new_index = (index as i32 + direction) as usize;
+                if new_index >= chapter_ids.len() {
+                    return;
+                }
+                chapter_ids.swap(index, new_index);
+                runtime.block_on(async { crate::db::set_tag_order(&pool, &chapter_ids).await })
+            }
+        };
+
+        if let Err(error) = result {
+            self.status = format!("Tag update failed: {error}");
+        }
+        self.refresh_tags();
+    }
+
     fn next_entity_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -171,59 +447,9 @@ impl App {
 
     fn export_all_recipes_to_json(&self) -> Result<String, String> {
         let pool = self.pool.clone();
-        let data = tokio::runtime::Runtime::new()
+        let document = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(async {
-                let recipes = crate::db::list_recipes(&pool).await.map_err(|err| err.to_string())?;
-                let mut exported = Vec::new();
-
-                for recipe in recipes {
-                    let detail = crate::db::load_recipe_detail(&pool, &recipe.id).await.map_err(|err| err.to_string())?;
-                    let ingredients = detail
-                        .ingredients
-                        .into_iter()
-                        .map(|ingredient| JsonIngredient {
-                            group_name: ingredient.group_name,
-                            quantity_unit: match (ingredient.quantity, ingredient.unit) {
-                                (Some(quantity), Some(unit)) => format!("{} {}", quantity, unit),
-                                (Some(quantity), None) => quantity,
-                                (None, Some(unit)) => unit,
-                                (None, None) => String::new(),
-                            },
-                            description: ingredient.ingredient_name,
-                            optional: ingredient.optional,
-                        })
-                        .collect();
-
-                    let steps = detail
-                        .steps
-                        .into_iter()
-                        .map(|step| JsonStep {
-                            instruction: step.instruction,
-                            optional: step.optional,
-                        })
-                        .collect();
-
-                    exported.push(JsonRecipe {
-                        uuid: Some(recipe.id.clone()),
-                        name: recipe.name,
-                        description: recipe.description,
-                        servings: recipe.servings,
-                        prep_time_minutes: recipe.prep_time_minutes,
-                        cook_time_minutes: recipe.cook_time_minutes,
-                        ingredients,
-                        steps,
-                    });
-                }
-
-                Ok::<_, String>(JsonExportDocument {
-                    version: 1,
-                    exported_at: Local::now().to_rfc3339(),
-                    recipes: exported,
-                })
-            });
-
-        let document = data?;
+            .block_on(build_export_document(&pool))?;
         serde_json::to_string_pretty(&document).map_err(|err| format!("Failed to encode JSON: {err}"))
     }
 
@@ -273,142 +499,14 @@ impl App {
         };
 
         let pool = self.pool.clone();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let result = runtime.block_on(async {
-            let existing = crate::db::list_recipes(&pool)
-                .await
-                .map_err(|err| format!("Could not load existing recipes: {err}"))?;
-            let existing_ids = existing.iter().map(|recipe| recipe.id.clone()).collect::<HashSet<_>>();
-
-            match self.import_mode {
-                ImportMode::OnlyAddNew => {
-                    let mut imported = 0usize;
-                    for recipe in document.recipes {
-                        let recipe_uuid = recipe.uuid.as_deref().filter(|value| !value.trim().is_empty());
-                        if let Some(uuid) = recipe_uuid {
-                            if existing_ids.contains(uuid) {
-                                continue;
-                            }
-                        }
-
-                        let groups = recipe
-                            .ingredients
-                            .iter()
-                            .map(|ingredient| crate::db::IngredientGroupInput {
-                                group_name: ingredient.group_name.clone(),
-                                quantity_unit: ingredient.quantity_unit.clone(),
-                                description: ingredient.description.clone(),
-                                optional: ingredient.optional,
-                            })
-                            .collect::<Vec<_>>();
-
-                        let steps = recipe
-                            .steps
-                            .iter()
-                            .map(|step| crate::db::StepInput {
-                                instruction: step.instruction.clone(),
-                                optional: step.optional,
-                            })
-                            .collect::<Vec<_>>();
-
-                        let saved = if let Some(uuid) = recipe_uuid {
-                            crate::db::upsert_recipe_with_details(
-                                &pool,
-                                Some(uuid),
-                                &recipe.name,
-                                recipe.description.as_deref(),
-                                recipe.servings,
-                                recipe.prep_time_minutes,
-                                recipe.cook_time_minutes,
-                                &groups,
-                                &steps,
-                            )
-                            .await
-                        } else {
-                            crate::db::save_recipe_with_details(
-                                &pool,
-                                &recipe.name,
-                                recipe.description.as_deref(),
-                                recipe.servings,
-                                recipe.prep_time_minutes,
-                                recipe.cook_time_minutes,
-                                &groups,
-                                &steps,
-                            )
-                            .await
-                        };
-
-                        if saved.is_ok() {
-                            imported += 1;
-                        }
-                    }
-
-                    Ok(imported)
-                }
-                ImportMode::OverwriteChanges => {
-                    let mut imported = 0usize;
-                    for recipe in document.recipes {
-                        let recipe_uuid = recipe.uuid.as_deref().filter(|value| !value.trim().is_empty());
-                        let groups = recipe
-                            .ingredients
-                            .iter()
-                            .map(|ingredient| crate::db::IngredientGroupInput {
-                                group_name: ingredient.group_name.clone(),
-                                quantity_unit: ingredient.quantity_unit.clone(),
-                                description: ingredient.description.clone(),
-                                optional: ingredient.optional,
-                            })
-                            .collect::<Vec<_>>();
-
-                        let steps = recipe
-                            .steps
-                            .iter()
-                            .map(|step| crate::db::StepInput {
-                                instruction: step.instruction.clone(),
-                                optional: step.optional,
-                            })
-                            .collect::<Vec<_>>();
-
-                        let saved = if let Some(uuid) = recipe_uuid {
-                            crate::db::upsert_recipe_with_details(
-                                &pool,
-                                Some(uuid),
-                                &recipe.name,
-                                recipe.description.as_deref(),
-                                recipe.servings,
-                                recipe.prep_time_minutes,
-                                recipe.cook_time_minutes,
-                                &groups,
-                                &steps,
-                            )
-                            .await
-                        } else {
-                            crate::db::save_recipe_with_details(
-                                &pool,
-                                &recipe.name,
-                                recipe.description.as_deref(),
-                                recipe.servings,
-                                recipe.prep_time_minutes,
-                                recipe.cook_time_minutes,
-                                &groups,
-                                &steps,
-                            )
-                            .await
-                        };
-
-                        if saved.is_ok() {
-                            imported += 1;
-                        }
-                    }
-
-                    Ok(imported)
-                }
-            }
-        });
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(import_document(&pool, document, self.import_mode));
 
         match result {
             Ok(imported) => {
                 self.refresh_recipe_list();
+                self.refresh_tags();
                 self.status = format!("Imported {} recipe(s) from {}", imported, path.display());
             }
             Err(err) => self.status = err,
@@ -437,6 +535,7 @@ impl App {
                     .cook_time_minutes
                     .map(|value| value.to_string())
                     .unwrap_or_default();
+                self.recipe.tag_ids = detail.tags.into_iter().map(|tag| tag.id).collect();
 
                 self.recipe.groups.clear();
                 let mut groups: Vec<IngredientGroup> = Vec::new();
@@ -668,10 +767,11 @@ impl eframe::App for App {
                                 .collect::<Vec<_>>();
 
                             let saved_name = name.to_string();
+                            let tag_ids = self.recipe.tag_ids.iter().cloned().collect::<Vec<_>>();
                             let saved_id = tokio::runtime::Runtime::new()
                                 .unwrap()
                                 .block_on(async {
-                                    crate::db::upsert_recipe_with_details(
+                                    let id = crate::db::upsert_recipe_with_details(
                                         &self.pool,
                                         self.selected_recipe_id.as_deref(),
                                         name,
@@ -698,7 +798,9 @@ impl eframe::App for App {
                                         &groups,
                                         &steps,
                                     )
-                                    .await
+                                    .await?;
+                                    crate::db::set_recipe_tags(&self.pool, &id, &tag_ids).await?;
+                                    Ok::<_, sqlx::Error>(id)
                                 });
 
                             match saved_id {
@@ -726,6 +828,60 @@ impl eframe::App for App {
                     });
 
                     ui.separator();
+                    egui::CollapsingHeader::new("Manage tags")
+                        .id_salt("manage_tags")
+                        .show(ui, |ui| {
+                            let mut add_tag = false;
+                            ui.horizontal(|ui| {
+                                ui.label("New tag");
+                                ui.add(egui::TextEdit::singleline(&mut self.new_tag_name).desired_width(180.0));
+                                ui.radio_value(&mut self.new_tag_kind, TagKind::Chapter, "Chapter");
+                                ui.radio_value(&mut self.new_tag_kind, TagKind::Content, "Content");
+                                add_tag = ui.button("Add tag").clicked();
+                            });
+                            if add_tag {
+                                self.add_tag();
+                            }
+
+                            let mut actions = Vec::new();
+                            for (kind, heading) in [(TagKind::Chapter, "Chapters (in order)"), (TagKind::Content, "Content tags")] {
+                                ui.label(heading);
+                                let entries = self.tags.iter_mut().filter(|entry| entry.tag.kind == kind);
+                                let mut count = 0;
+                                for (index, entry) in entries.enumerate() {
+                                    count += 1;
+                                    ui.push_id(("tag", entry.tag.id.clone()), |ui| {
+                                        ui.horizontal(|ui| {
+                                            let response = ui.add(
+                                                egui::TextEdit::singleline(&mut entry.edit_name).desired_width(180.0),
+                                            );
+                                            if response.lost_focus() && entry.edit_name != entry.tag.name {
+                                                actions.push(TagAction::Rename(entry.tag.id.clone(), entry.edit_name.clone()));
+                                            }
+                                            if kind == TagKind::Chapter {
+                                                if ui.button("up").clicked() && index > 0 {
+                                                    actions.push(TagAction::MoveChapter(index, -1));
+                                                }
+                                                if ui.button("down").clicked() {
+                                                    actions.push(TagAction::MoveChapter(index, 1));
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                actions.push(TagAction::Delete(entry.tag.id.clone()));
+                                            }
+                                        });
+                                    });
+                                }
+                                if count == 0 {
+                                    ui.label("None yet.");
+                                }
+                            }
+                            for action in actions {
+                                self.apply_tag_action(action);
+                            }
+                        });
+
+                    ui.separator();
 
                     ui.horizontal(|ui| {
                         ui.label("Recipe name");
@@ -747,6 +903,22 @@ impl eframe::App for App {
 
                     ui.label("Description");
                     ui.add(egui::TextEdit::multiline(&mut self.recipe.description).desired_rows(4));
+
+                    for (kind, label) in [(TagKind::Chapter, "Chapters"), (TagKind::Content, "Tags")] {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(label);
+                            for entry in self.tags.iter().filter(|entry| entry.tag.kind == kind) {
+                                let mut checked = self.recipe.tag_ids.contains(&entry.tag.id);
+                                if ui.checkbox(&mut checked, &entry.tag.name).changed() {
+                                    if checked {
+                                        self.recipe.tag_ids.insert(entry.tag.id.clone());
+                                    } else {
+                                        self.recipe.tag_ids.remove(&entry.tag.id);
+                                    }
+                                }
+                            }
+                        });
+                    }
 
                     ui.separator();
                     ui.heading("Ingredients");
@@ -960,8 +1132,14 @@ mod tests {
     #[test]
     fn json_document_round_trips() {
         let document = super::JsonExportDocument {
-            version: 1,
+            version: 2,
             exported_at: "2026-10-03T00:00:00Z".to_string(),
+            tags: vec![super::JsonTag {
+                uuid: "t1".to_string(),
+                name: "Soups".to_string(),
+                kind: super::TagKind::Chapter,
+                sort_order: 0,
+            }],
             recipes: vec![super::JsonRecipe {
                 uuid: Some("b0f0e9ab-5c38-4dc3-9c3f-f9ddc89c0338".to_string()),
                 name: "Tomato Soup".to_string(),
@@ -979,11 +1157,103 @@ mod tests {
                     instruction: "Boil and simmer.".to_string(),
                     optional: false,
                 }],
+                tags: vec!["t1".to_string()],
             }],
         };
 
         let json = serde_json::to_string_pretty(&document).unwrap();
         let parsed: super::JsonExportDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, document);
+    }
+
+    #[test]
+    fn version_1_document_without_tags_parses() {
+        let json = r#"{"version":1,"exported_at":"x","recipes":[{"name":"Soup","description":null,"servings":null,"prep_time_minutes":null,"cook_time_minutes":null,"ingredients":[],"steps":[]}]}"#;
+        let parsed: super::JsonExportDocument = serde_json::from_str(json).unwrap();
+        assert!(parsed.tags.is_empty());
+        assert!(parsed.recipes[0].tags.is_empty());
+    }
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = crate::db::connect_db("sqlite::memory:").await.unwrap();
+        crate::db::init_db(&pool).await.unwrap();
+        pool
+    }
+
+    fn tagged_document(tag_name: &str, recipe_name: &str) -> super::JsonExportDocument {
+        super::JsonExportDocument {
+            version: 2,
+            exported_at: "2026-10-03T00:00:00Z".to_string(),
+            tags: vec![super::JsonTag {
+                uuid: "t1".to_string(),
+                name: tag_name.to_string(),
+                kind: super::TagKind::Chapter,
+                sort_order: 0,
+            }],
+            recipes: vec![super::JsonRecipe {
+                uuid: Some("r1".to_string()),
+                name: recipe_name.to_string(),
+                description: None,
+                servings: None,
+                prep_time_minutes: None,
+                cook_time_minutes: None,
+                ingredients: vec![],
+                steps: vec![],
+                tags: vec!["t1".to_string(), "unknown".to_string()],
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn export_then_import_keeps_tags_and_uuids() {
+        let source = test_pool().await;
+        let tag_id = crate::db::create_tag(&source, "Soups", super::TagKind::Chapter).await.unwrap();
+        let recipe_id = crate::db::insert_recipe(&source, "Soup", None, None, None, None).await.unwrap();
+        crate::db::set_recipe_tags(&source, &recipe_id, &[tag_id.clone()]).await.unwrap();
+
+        let document = super::build_export_document(&source).await.unwrap();
+        let target = test_pool().await;
+        super::import_document(&target, document, super::ImportMode::OverwriteChanges)
+            .await
+            .unwrap();
+
+        let tags = crate::db::list_tags_for_recipe(&target, &recipe_id).await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, tag_id);
+        assert_eq!(tags[0].name, "Soups");
+        assert_eq!(tags[0].kind, super::TagKind::Chapter);
+    }
+
+    #[tokio::test]
+    async fn only_add_new_keeps_existing_tags_and_recipes() {
+        let pool = test_pool().await;
+        super::import_document(&pool, tagged_document("Soups", "Soup"), super::ImportMode::OnlyAddNew)
+            .await
+            .unwrap();
+
+        let imported = super::import_document(&pool, tagged_document("Stews", "Stew"), super::ImportMode::OnlyAddNew)
+            .await
+            .unwrap();
+
+        assert_eq!(imported, 0);
+        assert_eq!(crate::db::list_tags(&pool).await.unwrap()[0].name, "Soups");
+        assert_eq!(crate::db::list_recipes(&pool).await.unwrap()[0].name, "Soup");
+    }
+
+    #[tokio::test]
+    async fn overwrite_changes_updates_tags_and_skips_unknown_tag_refs() {
+        let pool = test_pool().await;
+        super::import_document(&pool, tagged_document("Soups", "Soup"), super::ImportMode::OverwriteChanges)
+            .await
+            .unwrap();
+        super::import_document(&pool, tagged_document("Stews", "Stew"), super::ImportMode::OverwriteChanges)
+            .await
+            .unwrap();
+
+        let tags = crate::db::list_tags_for_recipe(&pool, "r1").await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "Stews");
+        assert_eq!(crate::db::list_tags(&pool).await.unwrap().len(), 1);
+        assert_eq!(crate::db::list_recipes(&pool).await.unwrap()[0].name, "Stew");
     }
 }

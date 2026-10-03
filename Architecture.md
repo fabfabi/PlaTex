@@ -118,6 +118,13 @@ Each recipe should include:
 - updated_at
 - version
 
+Tags (`tags` + `recipe_tags`): a recipe has 0..n tags. Tags are identified by a uuid; names need not be unique. Each tag has a `kind`:
+
+- `chapter`: groups recipes into chapters; `sort_order` defines the chapter order
+- `content`: describes content, e.g. breakfast or vegan
+
+JSON export (version 2) contains a top-level `tags` list, and each recipe lists its tag uuids. Import matches tags by uuid with the same modes as recipes: "Only add new" skips existing uuids, "Overwrite changes" updates them, including the recipe's tag assignments.
+
 ## Recommended sharing model
 
 The project should use a lightweight sharing strategy:

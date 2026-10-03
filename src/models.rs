@@ -10,10 +10,23 @@ pub struct Recipe {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::Type, serde::Serialize, serde::Deserialize)]
+#[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum TagKind {
+    /// Groups recipes into ordered chapters.
+    Chapter,
+    /// Describes recipe content, e.g. breakfast or vegan.
+    #[default]
+    Content,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Tag {
-    pub id: i64,
+    pub id: String,
     pub name: String,
+    pub kind: TagKind,
+    pub sort_order: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -41,5 +54,5 @@ pub struct Step {
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct RecipeTag {
     pub recipe_id: String,
-    pub tag_id: i64,
+    pub tag_id: String,
 }

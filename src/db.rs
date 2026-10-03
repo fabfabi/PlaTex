@@ -1,9 +1,54 @@
 use sqlx::SqlitePool;
 
-use crate::models::{Ingredient, Recipe, Step, Tag};
+use crate::models::{Ingredient, Recipe, Step, Tag, TagKind};
 
 pub async fn connect_db(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     SqlitePool::connect(database_url).await
+}
+
+type LegacyTag = (i64, String, String, i64);
+type LegacyTagLink = (String, i64);
+
+/// Reads and drops tag tables that still use integer ids, so they can be
+/// recreated with uuid ids. Returns `None` when no migration is needed.
+async fn take_legacy_integer_tags(
+    pool: &SqlitePool,
+) -> Result<Option<(Vec<LegacyTag>, Vec<LegacyTagLink>)>, sqlx::Error> {
+    let columns = sqlx::query_as::<_, (String, String)>("SELECT name, type FROM pragma_table_info('tags')")
+        .fetch_all(pool)
+        .await?;
+    let has_integer_id = columns
+        .iter()
+        .any(|(name, column_type)| name == "id" && column_type.eq_ignore_ascii_case("INTEGER"));
+    if !has_integer_id {
+        return Ok(None);
+    }
+
+    let has_column = |column: &str| columns.iter().any(|(name, _)| name == column);
+    let kind = if has_column("kind") { "kind" } else { "'content'" };
+    let sort_order = if has_column("sort_order") { "sort_order" } else { "0" };
+    let tags = sqlx::query_as::<_, LegacyTag>(&format!("SELECT id, name, {kind}, {sort_order} FROM tags"))
+        .fetch_all(pool)
+        .await?;
+
+    let has_links = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'recipe_tags'",
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+    let links = if has_links {
+        sqlx::query_as::<_, LegacyTagLink>("SELECT recipe_id, tag_id FROM recipe_tags")
+            .fetch_all(pool)
+            .await?
+    } else {
+        Vec::new()
+    };
+
+    sqlx::query("DROP TABLE IF EXISTS recipe_tags").execute(pool).await?;
+    sqlx::query("DROP TABLE tags").execute(pool).await?;
+
+    Ok(Some((tags, links)))
 }
 
 pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -24,11 +69,15 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    let legacy_tags = take_legacy_integer_tags(pool).await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS tags (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'content',
+            sort_order INTEGER NOT NULL DEFAULT 0
         );
         "#,
     )
@@ -39,7 +88,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         r#"
         CREATE TABLE IF NOT EXISTS recipe_tags (
             recipe_id TEXT NOT NULL,
-            tag_id INTEGER NOT NULL,
+            tag_id TEXT NOT NULL,
             PRIMARY KEY (recipe_id, tag_id),
             FOREIGN KEY (recipe_id) REFERENCES recipes(id),
             FOREIGN KEY (tag_id) REFERENCES tags(id)
@@ -48,6 +97,35 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    if let Some((tags, links)) = legacy_tags {
+        let mut new_ids = std::collections::HashMap::new();
+        for (old_id, name, kind, sort_order) in tags {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO tags (id, name, kind, sort_order) VALUES (?, ?, ?, ?)")
+                .bind(&new_id)
+                .bind(name)
+                .bind(kind)
+                .bind(sort_order)
+                .execute(pool)
+                .await?;
+            new_ids.insert(old_id, new_id);
+        }
+        for (recipe_id, old_tag_id) in links {
+            if let Some(new_id) = new_ids.get(&old_tag_id) {
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO recipe_tags (recipe_id, tag_id)
+                    SELECT id, ? FROM recipes WHERE id = ?
+                    "#,
+                )
+                .bind(new_id)
+                .bind(recipe_id)
+                    .execute(pool)
+                    .await?;
+            }
+        }
+    }
 
     sqlx::query(
         r#"
@@ -153,11 +231,11 @@ pub async fn list_tags_for_recipe(
 ) -> Result<Vec<Tag>, sqlx::Error> {
     let tags = sqlx::query_as::<_, Tag>(
         r#"
-        SELECT t.id, t.name
+        SELECT t.id, t.name, t.kind, t.sort_order
         FROM tags t
         INNER JOIN recipe_tags rt ON rt.tag_id = t.id
         WHERE rt.recipe_id = ?
-        ORDER BY t.name
+        ORDER BY t.kind, t.sort_order, t.name
         "#,
     )
     .bind(recipe_id)
@@ -165,6 +243,107 @@ pub async fn list_tags_for_recipe(
     .await?;
 
     Ok(tags)
+}
+
+/// Lists all tags: chapters first (in chapter order), then content tags.
+pub async fn list_tags(pool: &SqlitePool) -> Result<Vec<Tag>, sqlx::Error> {
+    sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT id, name, kind, sort_order
+        FROM tags
+        ORDER BY kind, sort_order, name
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Creates a tag; new tags are appended after existing tags of the same kind.
+pub async fn create_tag(pool: &SqlitePool, name: &str, kind: TagKind) -> Result<String, sqlx::Error> {
+    let sort_order = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM tags WHERE kind = ?",
+    )
+    .bind(kind)
+    .fetch_one(pool)
+    .await?;
+
+    let tag_id = uuid::Uuid::new_v4().to_string();
+    upsert_tag(pool, &tag_id, name, kind, sort_order).await?;
+    Ok(tag_id)
+}
+
+/// Inserts the tag, or overwrites name, kind and order if the id already exists.
+pub async fn upsert_tag(
+    pool: &SqlitePool,
+    tag_id: &str,
+    name: &str,
+    kind: TagKind,
+    sort_order: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO tags (id, name, kind, sort_order)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind, sort_order = excluded.sort_order
+        "#,
+    )
+    .bind(tag_id)
+    .bind(name.trim())
+    .bind(kind)
+    .bind(sort_order)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn rename_tag(pool: &SqlitePool, tag_id: &str, name: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE tags SET name = ? WHERE id = ?")
+        .bind(name.trim())
+        .bind(tag_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Deletes a tag and removes it from all recipes.
+pub async fn delete_tag(pool: &SqlitePool, tag_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM recipe_tags WHERE tag_id = ?")
+        .bind(tag_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM tags WHERE id = ?")
+        .bind(tag_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Stores the given order: the tag at index `i` gets `sort_order = i`.
+pub async fn set_tag_order(pool: &SqlitePool, tag_ids: &[String]) -> Result<(), sqlx::Error> {
+    for (index, tag_id) in tag_ids.iter().enumerate() {
+        sqlx::query("UPDATE tags SET sort_order = ? WHERE id = ?")
+            .bind(index as i64)
+            .bind(tag_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Replaces all tags of a recipe with the given tags.
+pub async fn set_recipe_tags(pool: &SqlitePool, recipe_id: &str, tag_ids: &[String]) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM recipe_tags WHERE recipe_id = ?")
+        .bind(recipe_id)
+        .execute(pool)
+        .await?;
+    for tag_id in tag_ids {
+        sqlx::query("INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, ?)")
+            .bind(recipe_id)
+            .bind(tag_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn insert_recipe(
@@ -226,6 +405,7 @@ pub struct RecipeDetail {
     pub recipe: Recipe,
     pub ingredients: Vec<Ingredient>,
     pub steps: Vec<Step>,
+    pub tags: Vec<Tag>,
 }
 
 fn split_quantity_and_unit(value: &str) -> (Option<String>, Option<String>) {
@@ -517,8 +697,9 @@ pub async fn load_recipe_detail(pool: &SqlitePool, recipe_id: &str) -> Result<Re
 
     let ingredients = list_ingredients_for_recipe(pool, recipe_id).await?;
     let steps = list_steps_for_recipe(pool, recipe_id).await?;
+    let tags = list_tags_for_recipe(pool, recipe_id).await?;
 
-    Ok(RecipeDetail { recipe, ingredients, steps })
+    Ok(RecipeDetail { recipe, ingredients, steps, tags })
 }
 
 #[cfg(test)]
@@ -594,14 +775,14 @@ mod tests {
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO tags (name) VALUES ('breakfast'), ('quick');",
+            "INSERT INTO tags (id, name) VALUES ('t1', 'breakfast'), ('t2', 'quick');",
         )
         .execute(&pool)
         .await
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, 1), (?, 2);",
+            "INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, 't1'), (?, 't2');",
         )
         .bind(&recipe_id)
         .bind(&recipe_id)
@@ -688,5 +869,139 @@ mod tests {
         assert_eq!(detail.ingredients[0].ingredient_name, "tomato");
         assert_eq!(detail.steps.len(), 2);
         assert_eq!(detail.steps[1].instruction, "Add the sauce and stir.");
+    }
+
+    #[tokio::test]
+    async fn init_db_migrates_integer_tag_ids_to_uuids() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE recipes (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO recipes (id) VALUES ('r1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE recipe_tags (recipe_id TEXT NOT NULL, tag_id INTEGER NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tags (name) VALUES ('vegan')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO recipe_tags (recipe_id, tag_id) VALUES ('r1', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        init_db(&pool).await.unwrap();
+
+        let tags = list_tags(&pool).await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert!(uuid::Uuid::parse_str(&tags[0].id).is_ok());
+        assert_eq!(tags[0].name, "vegan");
+        assert_eq!(tags[0].kind, TagKind::Content);
+        assert_eq!(list_tags_for_recipe(&pool, "r1").await.unwrap(), tags);
+    }
+
+    #[tokio::test]
+    async fn upsert_tag_inserts_then_overwrites() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        upsert_tag(&pool, "t1", "Soups", TagKind::Chapter, 3).await.unwrap();
+        upsert_tag(&pool, "t1", "Stews", TagKind::Content, 1).await.unwrap();
+
+        let tags = list_tags(&pool).await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "Stews");
+        assert_eq!(tags[0].kind, TagKind::Content);
+        assert_eq!(tags[0].sort_order, 1);
+    }
+
+    #[tokio::test]
+    async fn create_tag_appends_per_kind_and_lists_chapters_first() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
+        create_tag(&pool, " Soups ", TagKind::Chapter).await.unwrap();
+        create_tag(&pool, "Desserts", TagKind::Chapter).await.unwrap();
+
+        let tags = list_tags(&pool).await.unwrap();
+        let names = tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["Soups", "Desserts", "vegan"]);
+        assert_eq!(tags[1].sort_order, 1);
+        assert_eq!(tags[2].sort_order, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_tag_names_are_allowed() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let first = create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
+        let second = create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(list_tags(&pool).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn set_tag_order_reorders_chapters() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let soups = create_tag(&pool, "Soups", TagKind::Chapter).await.unwrap();
+        let desserts = create_tag(&pool, "Desserts", TagKind::Chapter).await.unwrap();
+        set_tag_order(&pool, &[desserts, soups]).await.unwrap();
+
+        let names = list_tags(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Desserts", "Soups"]);
+    }
+
+    #[tokio::test]
+    async fn rename_tag_updates_name() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let tag_id = create_tag(&pool, "vegn", TagKind::Content).await.unwrap();
+        rename_tag(&pool, &tag_id, "vegan").await.unwrap();
+
+        assert_eq!(list_tags(&pool).await.unwrap()[0].name, "vegan");
+    }
+
+    #[tokio::test]
+    async fn set_recipe_tags_replaces_tags_and_delete_tag_unlinks() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let recipe_id = insert_recipe(&pool, "Porridge", None, None, None, None).await.unwrap();
+        let breakfast = create_tag(&pool, "breakfast", TagKind::Content).await.unwrap();
+        let vegan = create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
+        let mains = create_tag(&pool, "Mains", TagKind::Chapter).await.unwrap();
+
+        set_recipe_tags(&pool, &recipe_id, &[breakfast, mains.clone()]).await.unwrap();
+        set_recipe_tags(&pool, &recipe_id, &[vegan.clone(), mains.clone()]).await.unwrap();
+
+        let tags = load_recipe_detail(&pool, &recipe_id).await.unwrap().tags;
+        let names = tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["Mains", "vegan"]);
+
+        delete_tag(&pool, &vegan).await.unwrap();
+        let tags = list_tags_for_recipe(&pool, &recipe_id).await.unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, mains);
+        assert_eq!(list_tags(&pool).await.unwrap().len(), 2);
     }
 }
