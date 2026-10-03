@@ -34,7 +34,13 @@ fn main() -> eframe::Result<()> {
 
     eframe::run_native(
         "PlaTex",
-        eframe::NativeOptions::default(),
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_inner_size([900.0, 675.0])
+                .with_min_inner_size([700.0, 450.0])
+                .with_resizable(true),
+            ..Default::default()
+        },
         Box::new(move |_cc| Ok(Box::new(ui::App::new(pool.clone(), recipes.clone())))),
     )
 }

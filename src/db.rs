@@ -10,7 +10,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             description TEXT,
             servings INTEGER,
@@ -38,7 +38,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS recipe_tags (
-            recipe_id INTEGER NOT NULL,
+            recipe_id TEXT NOT NULL,
             tag_id INTEGER NOT NULL,
             PRIMARY KEY (recipe_id, tag_id),
             FOREIGN KEY (recipe_id) REFERENCES recipes(id),
@@ -53,7 +53,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         r#"
         CREATE TABLE IF NOT EXISTS ingredients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recipe_id INTEGER NOT NULL,
+            recipe_id TEXT NOT NULL,
             group_name TEXT,
             quantity TEXT,
             unit TEXT,
@@ -71,7 +71,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         r#"
         CREATE TABLE IF NOT EXISTS steps (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recipe_id INTEGER NOT NULL,
+            recipe_id TEXT NOT NULL,
             step_number INTEGER NOT NULL,
             instruction TEXT NOT NULL,
             optional BOOLEAN NOT NULL DEFAULT 0,
@@ -100,9 +100,18 @@ pub async fn list_recipes(pool: &SqlitePool) -> Result<Vec<Recipe>, sqlx::Error>
     Ok(recipes)
 }
 
+pub async fn clear_all_recipes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM recipe_tags").execute(pool).await?;
+    sqlx::query("DELETE FROM ingredients").execute(pool).await?;
+    sqlx::query("DELETE FROM steps").execute(pool).await?;
+    sqlx::query("DELETE FROM tags").execute(pool).await?;
+    sqlx::query("DELETE FROM recipes").execute(pool).await?;
+    Ok(())
+}
+
 pub async fn list_ingredients_for_recipe(
     pool: &SqlitePool,
-    recipe_id: i64,
+    recipe_id: &str,
 ) -> Result<Vec<Ingredient>, sqlx::Error> {
     let ingredients = sqlx::query_as::<_, Ingredient>(
         r#"
@@ -121,7 +130,7 @@ pub async fn list_ingredients_for_recipe(
 
 pub async fn list_steps_for_recipe(
     pool: &SqlitePool,
-    recipe_id: i64,
+    recipe_id: &str,
 ) -> Result<Vec<Step>, sqlx::Error> {
     let steps = sqlx::query_as::<_, Step>(
         r#"
@@ -140,7 +149,7 @@ pub async fn list_steps_for_recipe(
 
 pub async fn list_tags_for_recipe(
     pool: &SqlitePool,
-    recipe_id: i64,
+    recipe_id: &str,
 ) -> Result<Vec<Tag>, sqlx::Error> {
     let tags = sqlx::query_as::<_, Tag>(
         r#"
@@ -165,13 +174,28 @@ pub async fn insert_recipe(
     servings: Option<i64>,
     prep_time_minutes: Option<i64>,
     cook_time_minutes: Option<i64>,
-) -> Result<i64, sqlx::Error> {
-    let result = sqlx::query(
+) -> Result<String, sqlx::Error> {
+    let recipe_id = uuid::Uuid::new_v4().to_string();
+    insert_recipe_with_id(pool, &recipe_id, name, description, servings, prep_time_minutes, cook_time_minutes).await?;
+    Ok(recipe_id)
+}
+
+pub async fn insert_recipe_with_id(
+    pool: &SqlitePool,
+    recipe_id: &str,
+    name: &str,
+    description: Option<&str>,
+    servings: Option<i64>,
+    prep_time_minutes: Option<i64>,
+    cook_time_minutes: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
         r#"
-        INSERT INTO recipes (name, description, servings, prep_time_minutes, cook_time_minutes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        INSERT INTO recipes (id, name, description, servings, prep_time_minutes, cook_time_minutes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         "#,
     )
+    .bind(recipe_id)
     .bind(name)
     .bind(description)
     .bind(servings)
@@ -180,7 +204,7 @@ pub async fn insert_recipe(
     .execute(pool)
     .await?;
 
-    Ok(result.last_insert_rowid())
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,7 +258,7 @@ pub async fn save_recipe_with_details(
     cook_time_minutes: Option<i64>,
     groups: &[IngredientGroupInput],
     steps: &[StepInput],
-) -> Result<i64, sqlx::Error> {
+) -> Result<String, sqlx::Error> {
     let recipe_id = insert_recipe(
         pool,
         name,
@@ -260,7 +284,7 @@ pub async fn save_recipe_with_details(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(recipe_id)
+        .bind(&recipe_id)
         .bind(group.group_name.as_deref().filter(|value| !value.trim().is_empty()))
         .bind(quantity)
         .bind(unit)
@@ -283,7 +307,7 @@ pub async fn save_recipe_with_details(
             VALUES (?, ?, ?, ?, ?)
             "#,
         )
-        .bind(recipe_id)
+        .bind(&recipe_id)
         .bind(index as i64 + 1)
         .bind(trimmed_instruction)
         .bind(step.optional)
@@ -297,7 +321,7 @@ pub async fn save_recipe_with_details(
 
 pub async fn upsert_recipe_with_details(
     pool: &SqlitePool,
-    recipe_id: Option<i64>,
+    recipe_id: Option<&str>,
     name: &str,
     description: Option<&str>,
     servings: Option<i64>,
@@ -305,33 +329,110 @@ pub async fn upsert_recipe_with_details(
     cook_time_minutes: Option<i64>,
     groups: &[IngredientGroupInput],
     steps: &[StepInput],
-) -> Result<i64, sqlx::Error> {
+) -> Result<String, sqlx::Error> {
     if let Some(id) = recipe_id {
-        sqlx::query(
+        let existing_recipe = sqlx::query_scalar::<_, i64>(
             r#"
-            UPDATE recipes
-            SET name = ?, description = ?, servings = ?, prep_time_minutes = ?, cook_time_minutes = ?, updated_at = datetime('now')
+            SELECT COUNT(*)
+            FROM recipes
             WHERE id = ?
             "#,
         )
-        .bind(name)
-        .bind(description)
-        .bind(servings)
-        .bind(prep_time_minutes)
-        .bind(cook_time_minutes)
         .bind(id)
-        .execute(pool)
+        .fetch_one(pool)
         .await?;
 
-        sqlx::query("DELETE FROM ingredients WHERE recipe_id = ?")
-            .bind(id)
-            .execute(pool)
-            .await?;
-        sqlx::query("DELETE FROM steps WHERE recipe_id = ?")
+        if existing_recipe > 0 {
+            sqlx::query(
+                r#"
+                UPDATE recipes
+                SET name = ?, description = ?, servings = ?, prep_time_minutes = ?, cook_time_minutes = ?, updated_at = datetime('now')
+                WHERE id = ?
+                "#,
+            )
+            .bind(name)
+            .bind(description)
+            .bind(servings)
+            .bind(prep_time_minutes)
+            .bind(cook_time_minutes)
             .bind(id)
             .execute(pool)
             .await?;
 
+            sqlx::query("DELETE FROM ingredients WHERE recipe_id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            sqlx::query("DELETE FROM steps WHERE recipe_id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+
+            let mut next_group_sort = 0i64;
+            for group in groups {
+                let trimmed_description = group.description.trim();
+                let trimmed_quantity = group.quantity_unit.trim();
+                if trimmed_description.is_empty() && trimmed_quantity.is_empty() {
+                    continue;
+                }
+
+                let (quantity, unit) = split_quantity_and_unit(trimmed_quantity);
+                sqlx::query(
+                    r#"
+                    INSERT INTO ingredients (recipe_id, group_name, quantity, unit, ingredient_name, optional, sort_order)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(id)
+                .bind(group.group_name.as_deref().filter(|value| !value.trim().is_empty()))
+                .bind(quantity)
+                .bind(unit)
+                .bind(trimmed_description)
+                .bind(group.optional)
+                .bind(next_group_sort)
+                .execute(pool)
+                .await?;
+                next_group_sort += 1;
+            }
+
+            let mut next_step_sort = 0i64;
+            for step in steps {
+                let trimmed_instruction = step.instruction.trim();
+                if trimmed_instruction.is_empty() {
+                    continue;
+                }
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO steps (recipe_id, step_number, instruction, optional, sort_order)
+                    VALUES (?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(id)
+                .bind(next_step_sort + 1)
+                .bind(trimmed_instruction)
+                .bind(step.optional)
+                .bind(next_step_sort)
+                .execute(pool)
+                .await?;
+                next_step_sort += 1;
+            }
+
+            return Ok(id.to_string());
+        }
+    }
+
+    if let Some(id) = recipe_id {
+        insert_recipe_with_id(
+            pool,
+            id,
+            name,
+            description,
+            servings,
+            prep_time_minutes,
+            cook_time_minutes,
+        )
+        .await?;
         let mut next_group_sort = 0i64;
         for group in groups {
             let trimmed_description = group.description.trim();
@@ -382,7 +483,7 @@ pub async fn upsert_recipe_with_details(
             next_step_sort += 1;
         }
 
-        return Ok(id);
+        return Ok(id.to_string());
     }
 
     save_recipe_with_details(
@@ -402,7 +503,7 @@ pub async fn list_recipe_summaries(pool: &SqlitePool) -> Result<Vec<Recipe>, sql
     list_recipes(pool).await
 }
 
-pub async fn load_recipe_detail(pool: &SqlitePool, recipe_id: i64) -> Result<RecipeDetail, sqlx::Error> {
+pub async fn load_recipe_detail(pool: &SqlitePool, recipe_id: &str) -> Result<RecipeDetail, sqlx::Error> {
     let recipe = sqlx::query_as::<_, Recipe>(
         r#"
         SELECT id, name, description, servings, prep_time_minutes, cook_time_minutes, created_at, updated_at
@@ -502,8 +603,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, 1), (?, 2);",
         )
-        .bind(recipe_id)
-        .bind(recipe_id)
+        .bind(&recipe_id)
+        .bind(&recipe_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -511,8 +612,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO ingredients (recipe_id, group_name, quantity, unit, ingredient_name, optional, sort_order) VALUES (?, 'Base', '2', 'cups', 'flour', 0, 1), (?, 'Base', '1', 'cup', 'milk', 0, 2);",
         )
-        .bind(recipe_id)
-        .bind(recipe_id)
+        .bind(&recipe_id)
+        .bind(&recipe_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -520,15 +621,15 @@ mod tests {
         sqlx::query(
             "INSERT INTO steps (recipe_id, step_number, instruction, optional, sort_order) VALUES (?, 1, 'Mix ingredients.', 0, 1), (?, 2, 'Cook on pan.', 0, 2);",
         )
-        .bind(recipe_id)
-        .bind(recipe_id)
+        .bind(&recipe_id)
+        .bind(&recipe_id)
         .execute(&pool)
         .await
         .unwrap();
 
-        let ingredients = list_ingredients_for_recipe(&pool, recipe_id).await.unwrap();
-        let steps = list_steps_for_recipe(&pool, recipe_id).await.unwrap();
-        let tags = list_tags_for_recipe(&pool, recipe_id).await.unwrap();
+        let ingredients = list_ingredients_for_recipe(&pool, &recipe_id).await.unwrap();
+        let steps = list_steps_for_recipe(&pool, &recipe_id).await.unwrap();
+        let tags = list_tags_for_recipe(&pool, &recipe_id).await.unwrap();
 
         assert_eq!(ingredients.len(), 2);
         assert_eq!(steps.len(), 2);
@@ -578,7 +679,7 @@ mod tests {
         .await
         .unwrap();
 
-        let detail = load_recipe_detail(&pool, recipe_id).await.unwrap();
+        let detail = load_recipe_detail(&pool, &recipe_id).await.unwrap();
 
         assert_eq!(detail.recipe.name, "Pasta Primavera");
         assert_eq!(detail.recipe.prep_time_minutes, Some(20));

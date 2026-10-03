@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashSet, fs, sync::Arc};
 
+use chrono::Local;
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct IngredientItem {
@@ -37,20 +39,61 @@ struct RecipeDraft {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RecipeSummary {
-    id: i64,
+    id: String,
     name: String,
     prep_minutes: String,
     cook_minutes: String,
     servings: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportMode {
+    OnlyAddNew,
+    OverwriteChanges,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct JsonIngredient {
+    group_name: Option<String>,
+    quantity_unit: String,
+    description: String,
+    optional: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct JsonStep {
+    instruction: String,
+    optional: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct JsonRecipe {
+    #[serde(default)]
+    uuid: Option<String>,
+    name: String,
+    description: Option<String>,
+    servings: Option<i64>,
+    prep_time_minutes: Option<i64>,
+    cook_time_minutes: Option<i64>,
+    ingredients: Vec<JsonIngredient>,
+    steps: Vec<JsonStep>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct JsonExportDocument {
+    version: u32,
+    exported_at: String,
+    recipes: Vec<JsonRecipe>,
+}
+
 pub struct App {
     pool: Arc<sqlx::SqlitePool>,
-    selected_recipe_id: Option<i64>,
+    selected_recipe_id: Option<String>,
     recipe: RecipeDraft,
     recipes: Vec<RecipeSummary>,
     status: String,
     next_id: u64,
+    import_mode: ImportMode,
 }
 
 impl App {
@@ -62,6 +105,7 @@ impl App {
             recipes: Vec::new(),
             status: "Ready".to_string(),
             next_id: 1,
+            import_mode: ImportMode::OverwriteChanges,
         };
 
         app.recipe.groups.push(IngredientGroup {
@@ -117,15 +161,269 @@ impl App {
         id
     }
 
-    fn load_recipe_into_form(&mut self, recipe_id: i64) {
+    fn export_filename_for_date(date: chrono::NaiveDate) -> String {
+        format!("{}_PlaTex.json", date.format("%Y%m%d"))
+    }
+
+    fn today_export_filename() -> String {
+        Self::export_filename_for_date(Local::now().date_naive())
+    }
+
+    fn export_all_recipes_to_json(&self) -> Result<String, String> {
+        let pool = self.pool.clone();
+        let data = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async {
+                let recipes = crate::db::list_recipes(&pool).await.map_err(|err| err.to_string())?;
+                let mut exported = Vec::new();
+
+                for recipe in recipes {
+                    let detail = crate::db::load_recipe_detail(&pool, &recipe.id).await.map_err(|err| err.to_string())?;
+                    let ingredients = detail
+                        .ingredients
+                        .into_iter()
+                        .map(|ingredient| JsonIngredient {
+                            group_name: ingredient.group_name,
+                            quantity_unit: match (ingredient.quantity, ingredient.unit) {
+                                (Some(quantity), Some(unit)) => format!("{} {}", quantity, unit),
+                                (Some(quantity), None) => quantity,
+                                (None, Some(unit)) => unit,
+                                (None, None) => String::new(),
+                            },
+                            description: ingredient.ingredient_name,
+                            optional: ingredient.optional,
+                        })
+                        .collect();
+
+                    let steps = detail
+                        .steps
+                        .into_iter()
+                        .map(|step| JsonStep {
+                            instruction: step.instruction,
+                            optional: step.optional,
+                        })
+                        .collect();
+
+                    exported.push(JsonRecipe {
+                        uuid: Some(recipe.id.clone()),
+                        name: recipe.name,
+                        description: recipe.description,
+                        servings: recipe.servings,
+                        prep_time_minutes: recipe.prep_time_minutes,
+                        cook_time_minutes: recipe.cook_time_minutes,
+                        ingredients,
+                        steps,
+                    });
+                }
+
+                Ok::<_, String>(JsonExportDocument {
+                    version: 1,
+                    exported_at: Local::now().to_rfc3339(),
+                    recipes: exported,
+                })
+            });
+
+        let document = data?;
+        serde_json::to_string_pretty(&document).map_err(|err| format!("Failed to encode JSON: {err}"))
+    }
+
+    fn export_json_file(&mut self) {
+        let target = rfd::FileDialog::new()
+            .set_file_name(&Self::today_export_filename())
+            .add_filter("JSON", &["json"])
+            .save_file();
+
+        let Some(path) = target else {
+            self.status = "Export cancelled.".to_string();
+            return;
+        };
+
+        match self.export_all_recipes_to_json() {
+            Ok(json) => match fs::write(&path, json) {
+                Ok(_) => self.status = format!("Exported JSON to {}", path.display()),
+                Err(err) => self.status = format!("Export failed: {err}"),
+            },
+            Err(err) => self.status = err,
+        }
+    }
+
+    fn import_json_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        else {
+            self.status = "Import cancelled.".to_string();
+            return;
+        };
+
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) => {
+                self.status = format!("Import failed to read file: {err}");
+                return;
+            }
+        };
+
+        let document: JsonExportDocument = match serde_json::from_str(&content) {
+            Ok(document) => document,
+            Err(err) => {
+                self.status = format!("Import failed to parse JSON: {err}");
+                return;
+            }
+        };
+
+        let pool = self.pool.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let existing = crate::db::list_recipes(&pool)
+                .await
+                .map_err(|err| format!("Could not load existing recipes: {err}"))?;
+            let existing_ids = existing.iter().map(|recipe| recipe.id.clone()).collect::<HashSet<_>>();
+
+            match self.import_mode {
+                ImportMode::OnlyAddNew => {
+                    let mut imported = 0usize;
+                    for recipe in document.recipes {
+                        let recipe_uuid = recipe.uuid.as_deref().filter(|value| !value.trim().is_empty());
+                        if let Some(uuid) = recipe_uuid {
+                            if existing_ids.contains(uuid) {
+                                continue;
+                            }
+                        }
+
+                        let groups = recipe
+                            .ingredients
+                            .iter()
+                            .map(|ingredient| crate::db::IngredientGroupInput {
+                                group_name: ingredient.group_name.clone(),
+                                quantity_unit: ingredient.quantity_unit.clone(),
+                                description: ingredient.description.clone(),
+                                optional: ingredient.optional,
+                            })
+                            .collect::<Vec<_>>();
+
+                        let steps = recipe
+                            .steps
+                            .iter()
+                            .map(|step| crate::db::StepInput {
+                                instruction: step.instruction.clone(),
+                                optional: step.optional,
+                            })
+                            .collect::<Vec<_>>();
+
+                        let saved = if let Some(uuid) = recipe_uuid {
+                            crate::db::upsert_recipe_with_details(
+                                &pool,
+                                Some(uuid),
+                                &recipe.name,
+                                recipe.description.as_deref(),
+                                recipe.servings,
+                                recipe.prep_time_minutes,
+                                recipe.cook_time_minutes,
+                                &groups,
+                                &steps,
+                            )
+                            .await
+                        } else {
+                            crate::db::save_recipe_with_details(
+                                &pool,
+                                &recipe.name,
+                                recipe.description.as_deref(),
+                                recipe.servings,
+                                recipe.prep_time_minutes,
+                                recipe.cook_time_minutes,
+                                &groups,
+                                &steps,
+                            )
+                            .await
+                        };
+
+                        if saved.is_ok() {
+                            imported += 1;
+                        }
+                    }
+
+                    Ok(imported)
+                }
+                ImportMode::OverwriteChanges => {
+                    let mut imported = 0usize;
+                    for recipe in document.recipes {
+                        let recipe_uuid = recipe.uuid.as_deref().filter(|value| !value.trim().is_empty());
+                        let groups = recipe
+                            .ingredients
+                            .iter()
+                            .map(|ingredient| crate::db::IngredientGroupInput {
+                                group_name: ingredient.group_name.clone(),
+                                quantity_unit: ingredient.quantity_unit.clone(),
+                                description: ingredient.description.clone(),
+                                optional: ingredient.optional,
+                            })
+                            .collect::<Vec<_>>();
+
+                        let steps = recipe
+                            .steps
+                            .iter()
+                            .map(|step| crate::db::StepInput {
+                                instruction: step.instruction.clone(),
+                                optional: step.optional,
+                            })
+                            .collect::<Vec<_>>();
+
+                        let saved = if let Some(uuid) = recipe_uuid {
+                            crate::db::upsert_recipe_with_details(
+                                &pool,
+                                Some(uuid),
+                                &recipe.name,
+                                recipe.description.as_deref(),
+                                recipe.servings,
+                                recipe.prep_time_minutes,
+                                recipe.cook_time_minutes,
+                                &groups,
+                                &steps,
+                            )
+                            .await
+                        } else {
+                            crate::db::save_recipe_with_details(
+                                &pool,
+                                &recipe.name,
+                                recipe.description.as_deref(),
+                                recipe.servings,
+                                recipe.prep_time_minutes,
+                                recipe.cook_time_minutes,
+                                &groups,
+                                &steps,
+                            )
+                            .await
+                        };
+
+                        if saved.is_ok() {
+                            imported += 1;
+                        }
+                    }
+
+                    Ok(imported)
+                }
+            }
+        });
+
+        match result {
+            Ok(imported) => {
+                self.refresh_recipe_list();
+                self.status = format!("Imported {} recipe(s) from {}", imported, path.display());
+            }
+            Err(err) => self.status = err,
+        }
+    }
+
+    fn load_recipe_into_form(&mut self, recipe_id: String) {
         let pool = self.pool.clone();
         let detail = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(async { crate::db::load_recipe_detail(&pool, recipe_id).await });
+            .block_on(async { crate::db::load_recipe_detail(&pool, &recipe_id).await });
 
         match detail {
             Ok(detail) => {
-                self.selected_recipe_id = Some(recipe_id);
+                self.selected_recipe_id = Some(recipe_id.clone());
                 self.recipe.name = detail.recipe.name;
                 self.recipe.description = detail.recipe.description.unwrap_or_default();
                 self.recipe.servings = detail.recipe.servings.map(|value| value.to_string()).unwrap_or_default();
@@ -293,342 +591,399 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("PlaTex");
-            ui.label("Local recipe editor");
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button("New recipe").clicked() {
-                    self.reset_recipe();
-                    self.status = "New recipe".to_string();
-                }
-
-                if ui.button("Save recipe").clicked() {
-                    let name = self.recipe.name.trim();
-                    if name.is_empty() {
-                        self.status = "Recipe name is required.".to_string();
-                        return;
-                    }
-
-                    let has_valid_ingredient = self.recipe.groups.iter().any(|group| {
-                        group.ingredients.iter().any(|ingredient| {
-                            !ingredient.description.trim().is_empty()
-                                || !ingredient.quantity_unit.trim().is_empty()
-                        })
-                    });
-
-                    if !has_valid_ingredient {
-                        self.status = "Add at least one ingredient.".to_string();
-                        return;
-                    }
-
-                    let has_step = self
-                        .recipe
-                        .steps
-                        .iter()
-                        .any(|step| !step.instruction.trim().is_empty());
-
-                    if !has_step {
-                        self.status = "Add at least one preparation step.".to_string();
-                        return;
-                    }
-
-                    let groups = self
-                        .recipe
-                        .groups
-                        .iter()
-                        .flat_map(|group| {
-                            group.ingredients.iter().filter_map(|ingredient| {
-                                if ingredient.description.trim().is_empty()
-                                    && ingredient.quantity_unit.trim().is_empty()
-                                {
-                                    None
-                                } else {
-                                    Some(crate::db::IngredientGroupInput {
-                                        group_name: Some(group.name.trim().to_string()),
-                                        quantity_unit: ingredient.quantity_unit.trim().to_string(),
-                                        description: ingredient.description.trim().to_string(),
-                                        optional: ingredient.optional,
-                                    })
-                                }
-                            })
-                        })
-                        .collect::<Vec<_>>();
-
-                    let steps = self
-                        .recipe
-                        .steps
-                        .iter()
-                        .filter(|step| !step.instruction.trim().is_empty())
-                        .map(|step| crate::db::StepInput {
-                            instruction: step.instruction.trim().to_string(),
-                            optional: step.optional,
-                        })
-                        .collect::<Vec<_>>();
-
-                    let saved_name = name.to_string();
-                    let saved_id = tokio::runtime::Runtime::new()
-                        .unwrap()
-                        .block_on(async {
-                            crate::db::upsert_recipe_with_details(
-                                &self.pool,
-                                self.selected_recipe_id,
-                                name,
-                                if self.recipe.description.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(self.recipe.description.trim())
-                                },
-                                self.recipe
-                                    .servings
-                                    .trim()
-                                    .parse::<i64>()
-                                    .ok(),
-                                self.recipe
-                                    .prep_minutes
-                                    .trim()
-                                    .parse::<i64>()
-                                    .ok(),
-                                self.recipe
-                                    .cook_minutes
-                                    .trim()
-                                    .parse::<i64>()
-                                    .ok(),
-                                &groups,
-                                &steps,
-                            )
-                            .await
-                        });
-
-                    match saved_id {
-                        Ok(id) => {
-                            self.selected_recipe_id = Some(id);
-                            self.refresh_recipe_list();
-                            self.status = format!("Saved: {}", saved_name);
-                        }
-                        Err(error) => self.status = format!("Save failed: {error}"),
-                    }
-                }
-
-                if ui.button("Export LaTeX").clicked() {
-                    self.status = "Export ready".to_string();
-                }
-            });
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                ui.label("Recipe name");
-                ui.add(egui::TextEdit::singleline(&mut self.recipe.name).desired_width(220.0));
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Servings");
-                ui.add(egui::TextEdit::singleline(&mut self.recipe.servings).desired_width(80.0));
-                ui.label("Prep time");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.recipe.prep_minutes).desired_width(80.0),
-                );
-                ui.label("Cook time");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.recipe.cook_minutes).desired_width(80.0),
-                );
-            });
-
-            ui.label("Description");
-            ui.add(egui::TextEdit::multiline(&mut self.recipe.description).desired_rows(4));
-
-            ui.separator();
-            ui.heading("Ingredients");
-            egui::ScrollArea::vertical()
-                .id_salt("ingredients_scroll")
-                .max_height(220.0)
+            egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let mut group_indexes_to_remove = Vec::new();
-                    for group_index in 0..self.recipe.groups.len() {
-                        let group_count = self.recipe.groups.len();
-                        let mut move_group_up = false;
-                        let mut move_group_down = false;
-                        let mut add_ingredient = false;
-                        let mut remove_group = false;
+                    ui.heading("PlaTex");
+                    ui.label("Local recipe editor");
+                    ui.separator();
 
-                        ui.push_id(("ingredient_group", self.recipe.groups[group_index].id), |ui| {
-                            ui.horizontal(|ui| {
-                                let group = &mut self.recipe.groups[group_index];
-                                ui.label("Group");
-                                ui.add(egui::TextEdit::singleline(&mut group.name).desired_width(180.0));
-                                move_group_up = ui.button("up").clicked() && group_index > 0;
-                                move_group_down = ui.button("down").clicked() && group_index + 1 < group_count;
-                                add_ingredient = ui.button("Add ingredient").clicked();
-                                remove_group = ui.button("Remove group").clicked() && group_count > 1;
+                    ui.horizontal(|ui| {
+                        if ui.button("New recipe").clicked() {
+                            self.reset_recipe();
+                            self.status = "New recipe".to_string();
+                        }
+
+                        if ui.button("Save recipe").clicked() {
+                            let name = self.recipe.name.trim();
+                            if name.is_empty() {
+                                self.status = "Recipe name is required.".to_string();
+                                return;
+                            }
+
+                            let has_valid_ingredient = self.recipe.groups.iter().any(|group| {
+                                group.ingredients.iter().any(|ingredient| {
+                                    !ingredient.description.trim().is_empty()
+                                        || !ingredient.quantity_unit.trim().is_empty()
+                                })
                             });
-                        });
 
-                        if move_group_up {
-                            self.move_group(group_index, -1);
-                        }
-                        if move_group_down {
-                            self.move_group(group_index, 1);
-                        }
-                        if add_ingredient {
-                            self.add_ingredient(group_index);
-                        }
-                        if remove_group {
-                            group_indexes_to_remove.push(group_index);
+                            if !has_valid_ingredient {
+                                self.status = "Add at least one ingredient.".to_string();
+                                return;
+                            }
+
+                            let has_step = self
+                                .recipe
+                                .steps
+                                .iter()
+                                .any(|step| !step.instruction.trim().is_empty());
+
+                            if !has_step {
+                                self.status = "Add at least one preparation step.".to_string();
+                                return;
+                            }
+
+                            let groups = self
+                                .recipe
+                                .groups
+                                .iter()
+                                .flat_map(|group| {
+                                    group.ingredients.iter().filter_map(|ingredient| {
+                                        if ingredient.description.trim().is_empty()
+                                            && ingredient.quantity_unit.trim().is_empty()
+                                        {
+                                            None
+                                        } else {
+                                            Some(crate::db::IngredientGroupInput {
+                                                group_name: Some(group.name.trim().to_string()),
+                                                quantity_unit: ingredient.quantity_unit.trim().to_string(),
+                                                description: ingredient.description.trim().to_string(),
+                                                optional: ingredient.optional,
+                                            })
+                                        }
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+
+                            let steps = self
+                                .recipe
+                                .steps
+                                .iter()
+                                .filter(|step| !step.instruction.trim().is_empty())
+                                .map(|step| crate::db::StepInput {
+                                    instruction: step.instruction.trim().to_string(),
+                                    optional: step.optional,
+                                })
+                                .collect::<Vec<_>>();
+
+                            let saved_name = name.to_string();
+                            let saved_id = tokio::runtime::Runtime::new()
+                                .unwrap()
+                                .block_on(async {
+                                    crate::db::upsert_recipe_with_details(
+                                        &self.pool,
+                                        self.selected_recipe_id.as_deref(),
+                                        name,
+                                        if self.recipe.description.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(self.recipe.description.trim())
+                                        },
+                                        self.recipe
+                                            .servings
+                                            .trim()
+                                            .parse::<i64>()
+                                            .ok(),
+                                        self.recipe
+                                            .prep_minutes
+                                            .trim()
+                                            .parse::<i64>()
+                                            .ok(),
+                                        self.recipe
+                                            .cook_minutes
+                                            .trim()
+                                            .parse::<i64>()
+                                            .ok(),
+                                        &groups,
+                                        &steps,
+                                    )
+                                    .await
+                                });
+
+                            match saved_id {
+                                Ok(id) => {
+                                    self.selected_recipe_id = Some(id.clone());
+                                    self.refresh_recipe_list();
+                                    self.status = format!("Saved: {}", saved_name);
+                                }
+                                Err(error) => self.status = format!("Save failed: {error}"),
+                            }
                         }
 
-                        let mut ingredient_indexes_to_remove = Vec::new();
-                        let mut ingredient_move_actions = Vec::new();
+                        if ui.button("Export JSON").clicked() {
+                            self.export_json_file();
+                        }
+                    });
 
-                        ui.vertical(|ui| {
-                            let ingredient_count = self.recipe.groups[group_index].ingredients.len();
-                            for ingredient_index in 0..ingredient_count {
-                                let mut move_ingredient_up = false;
-                                let mut move_ingredient_down = false;
-                                let mut remove_ingredient = false;
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.import_mode, ImportMode::OnlyAddNew, "Only add new recipes");
+                        ui.radio_value(&mut self.import_mode, ImportMode::OverwriteChanges, "Overwrite changes");
+                        if ui.button("Import JSON").clicked() {
+                            self.import_json_file();
+                        }
+                    });
 
-                                ui.push_id(("ingredient", self.recipe.groups[group_index].id, self.recipe.groups[group_index].ingredients[ingredient_index].id), |ui| {
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Recipe name");
+                        ui.add(egui::TextEdit::singleline(&mut self.recipe.name).desired_width(220.0));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Servings");
+                        ui.add(egui::TextEdit::singleline(&mut self.recipe.servings).desired_width(80.0));
+                        ui.label("Prep time");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.recipe.prep_minutes).desired_width(80.0),
+                        );
+                        ui.label("Cook time");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.recipe.cook_minutes).desired_width(80.0),
+                        );
+                    });
+
+                    ui.label("Description");
+                    ui.add(egui::TextEdit::multiline(&mut self.recipe.description).desired_rows(4));
+
+                    ui.separator();
+                    ui.heading("Ingredients");
+                    egui::ScrollArea::vertical()
+                        .id_salt("ingredients_scroll")
+                        .max_height(220.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let mut group_indexes_to_remove = Vec::new();
+                            for group_index in 0..self.recipe.groups.len() {
+                                let group_count = self.recipe.groups.len();
+                                let mut move_group_up = false;
+                                let mut move_group_down = false;
+                                let mut add_ingredient = false;
+                                let mut remove_group = false;
+
+                                ui.push_id(("ingredient_group", self.recipe.groups[group_index].id), |ui| {
                                     ui.horizontal(|ui| {
-                                        let ingredient =
-                                            &mut self.recipe.groups[group_index].ingredients[ingredient_index];
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut ingredient.quantity_unit)
-                                                .desired_width(150.0),
-                                        );
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut ingredient.description)
-                                                .desired_width(240.0),
-                                        );
-                                        ui.checkbox(&mut ingredient.optional, "Optional");
-                                        move_ingredient_up = ui.button("up").clicked() && ingredient_index > 0;
-                                        move_ingredient_down = ui.button("down").clicked()
-                                            && ingredient_index + 1 < ingredient_count;
-                                        remove_ingredient =
-                                            ui.button("Remove").clicked() && ingredient_count > 1;
+                                        let group = &mut self.recipe.groups[group_index];
+                                        ui.label("Group");
+                                        ui.add(egui::TextEdit::singleline(&mut group.name).desired_width(180.0));
+                                        move_group_up = ui.button("up").clicked() && group_index > 0;
+                                        move_group_down = ui.button("down").clicked() && group_index + 1 < group_count;
+                                        add_ingredient = ui.button("Add ingredient").clicked();
+                                        remove_group = ui.button("Remove group").clicked() && group_count > 1;
                                     });
                                 });
 
-                                if move_ingredient_up {
-                                    ingredient_move_actions.push((ingredient_index, -1));
+                                if move_group_up {
+                                    self.move_group(group_index, -1);
                                 }
-                                if move_ingredient_down {
-                                    ingredient_move_actions.push((ingredient_index, 1));
+                                if move_group_down {
+                                    self.move_group(group_index, 1);
                                 }
-                                if remove_ingredient {
-                                    ingredient_indexes_to_remove.push(ingredient_index);
+                                if add_ingredient {
+                                    self.add_ingredient(group_index);
                                 }
-                            }
-                        });
+                                if remove_group {
+                                    group_indexes_to_remove.push(group_index);
+                                }
 
-                        for (ingredient_index, direction) in ingredient_move_actions {
-                            self.move_ingredient(group_index, ingredient_index, direction);
-                        }
-                        for ingredient_index in ingredient_indexes_to_remove.into_iter().rev() {
-                            if self.recipe.groups[group_index].ingredients.len() > 1 {
-                                self.recipe.groups[group_index]
-                                    .ingredients
-                                    .remove(ingredient_index);
-                            }
-                        }
-                    }
+                                let mut ingredient_indexes_to_remove = Vec::new();
+                                let mut ingredient_move_actions = Vec::new();
 
-                    for group_index in group_indexes_to_remove.into_iter().rev() {
-                        if self.recipe.groups.len() > 1 {
-                            self.recipe.groups.remove(group_index);
-                        }
-                    }
+                                ui.vertical(|ui| {
+                                    let ingredient_count = self.recipe.groups[group_index].ingredients.len();
+                                    for ingredient_index in 0..ingredient_count {
+                                        let mut move_ingredient_up = false;
+                                        let mut move_ingredient_down = false;
+                                        let mut remove_ingredient = false;
 
-                    if ui.button("Add ingredient group").clicked() {
-                        self.add_group();
-                    }
-                });
+                                        ui.push_id(("ingredient", self.recipe.groups[group_index].id, self.recipe.groups[group_index].ingredients[ingredient_index].id), |ui| {
+                                            ui.horizontal(|ui| {
+                                                let ingredient =
+                                                    &mut self.recipe.groups[group_index].ingredients[ingredient_index];
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut ingredient.quantity_unit)
+                                                        .desired_width(150.0),
+                                                );
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut ingredient.description)
+                                                        .desired_width(240.0),
+                                                );
+                                                ui.checkbox(&mut ingredient.optional, "Optional");
+                                                move_ingredient_up = ui.button("up").clicked() && ingredient_index > 0;
+                                                move_ingredient_down = ui.button("down").clicked()
+                                                    && ingredient_index + 1 < ingredient_count;
+                                                remove_ingredient =
+                                                    ui.button("Remove").clicked() && ingredient_count > 1;
+                                            });
+                                        });
 
-            ui.separator();
-            ui.heading("Preparation manual");
-            egui::ScrollArea::vertical()
-                .id_salt("steps_scroll")
-                .max_height(220.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let mut step_indexes_to_remove = Vec::new();
-                    for step_index in 0..self.recipe.steps.len() {
-                        let step_count = self.recipe.steps.len();
-                        let mut move_step_up = false;
-                        let mut move_step_down = false;
-                        let mut remove_step = false;
-
-                        ui.push_id(("preparation_step", self.recipe.steps[step_index].id), |ui| {
-                            ui.horizontal(|ui| {
-                                let step = &mut self.recipe.steps[step_index];
-                                ui.label(format!("Step {}", step_index + 1));
-                                ui.checkbox(&mut step.optional, "Optional");
-                                move_step_up = ui.button("up").clicked() && step_index > 0;
-                                move_step_down = ui.button("down").clicked() && step_index + 1 < step_count;
-                                remove_step = ui.button("Remove").clicked() && step_count > 1;
-                            });
-
-                            ui.add(
-                                egui::TextEdit::multiline(&mut self.recipe.steps[step_index].instruction)
-                                    .desired_rows(3),
-                            );
-                        });
-
-                        if move_step_up {
-                            self.move_step(step_index, -1);
-                        }
-                        if move_step_down {
-                            self.move_step(step_index, 1);
-                        }
-                        if remove_step {
-                            step_indexes_to_remove.push(step_index);
-                        }
-                    }
-
-                    for step_index in step_indexes_to_remove.into_iter().rev() {
-                        if self.recipe.steps.len() > 1 {
-                            self.recipe.steps.remove(step_index);
-                        }
-                    }
-
-                    if ui.button("Add preparation step").clicked() {
-                        self.add_step();
-                    }
-                });
-
-            ui.separator();
-            ui.label(format!("Status: {}", self.status));
-
-            ui.separator();
-            ui.heading("Recipes");
-            egui::ScrollArea::vertical()
-                .id_salt("recipes_scroll")
-                .max_height(180.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if self.recipes.is_empty() {
-                        ui.label("No recipes yet.");
-                    } else {
-                        for (recipe_index, recipe) in self.recipes.clone().into_iter().enumerate() {
-                            ui.push_id(("saved_recipe", recipe_index, recipe.id), |ui| {
-                                ui.horizontal(|ui| {
-                                    if ui.button(&recipe.name).clicked() {
-                                        self.load_recipe_into_form(recipe.id);
-                                    }
-                                    if !recipe.prep_minutes.is_empty() {
-                                        ui.label(format!("Prep {} min", recipe.prep_minutes));
-                                    }
-                                    if !recipe.cook_minutes.is_empty() {
-                                        ui.label(format!("Cook {} min", recipe.cook_minutes));
-                                    }
-                                    if !recipe.servings.is_empty() {
-                                        ui.label(format!("Serves {}", recipe.servings));
+                                        if move_ingredient_up {
+                                            ingredient_move_actions.push((ingredient_index, -1));
+                                        }
+                                        if move_ingredient_down {
+                                            ingredient_move_actions.push((ingredient_index, 1));
+                                        }
+                                        if remove_ingredient {
+                                            ingredient_indexes_to_remove.push(ingredient_index);
+                                        }
                                     }
                                 });
-                            });
-                        }
-                    }
+
+                                for (ingredient_index, direction) in ingredient_move_actions {
+                                    self.move_ingredient(group_index, ingredient_index, direction);
+                                }
+                                for ingredient_index in ingredient_indexes_to_remove.into_iter().rev() {
+                                    if self.recipe.groups[group_index].ingredients.len() > 1 {
+                                        self.recipe.groups[group_index]
+                                            .ingredients
+                                            .remove(ingredient_index);
+                                    }
+                                }
+                            }
+
+                            for group_index in group_indexes_to_remove.into_iter().rev() {
+                                if self.recipe.groups.len() > 1 {
+                                    self.recipe.groups.remove(group_index);
+                                }
+                            }
+
+                            if ui.button("Add ingredient group").clicked() {
+                                self.add_group();
+                            }
+                        });
+
+                    ui.separator();
+                    ui.heading("Preparation manual");
+                    egui::ScrollArea::vertical()
+                        .id_salt("steps_scroll")
+                        .max_height(220.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let mut step_indexes_to_remove = Vec::new();
+                            for step_index in 0..self.recipe.steps.len() {
+                                let step_count = self.recipe.steps.len();
+                                let mut move_step_up = false;
+                                let mut move_step_down = false;
+                                let mut remove_step = false;
+
+                                ui.push_id(("preparation_step", self.recipe.steps[step_index].id), |ui| {
+                                    ui.horizontal(|ui| {
+                                        let step = &mut self.recipe.steps[step_index];
+                                        ui.label(format!("Step {}", step_index + 1));
+                                        ui.checkbox(&mut step.optional, "Optional");
+                                        move_step_up = ui.button("up").clicked() && step_index > 0;
+                                        move_step_down = ui.button("down").clicked() && step_index + 1 < step_count;
+                                        remove_step = ui.button("Remove").clicked() && step_count > 1;
+                                    });
+
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut self.recipe.steps[step_index].instruction)
+                                            .desired_rows(3),
+                                    );
+                                });
+
+                                if move_step_up {
+                                    self.move_step(step_index, -1);
+                                }
+                                if move_step_down {
+                                    self.move_step(step_index, 1);
+                                }
+                                if remove_step {
+                                    step_indexes_to_remove.push(step_index);
+                                }
+                            }
+
+                            for step_index in step_indexes_to_remove.into_iter().rev() {
+                                if self.recipe.steps.len() > 1 {
+                                    self.recipe.steps.remove(step_index);
+                                }
+                            }
+
+                            if ui.button("Add preparation step").clicked() {
+                                self.add_step();
+                            }
+                        });
+
+                    ui.separator();
+                    ui.label(format!("Status: {}", self.status));
+
+                    ui.separator();
+                    ui.heading("Recipes");
+                    egui::ScrollArea::vertical()
+                        .id_salt("recipes_scroll")
+                        .max_height(180.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if self.recipes.is_empty() {
+                                ui.label("No recipes yet.");
+                            } else {
+                                for (recipe_index, recipe) in self.recipes.clone().into_iter().enumerate() {
+                                    let recipe_id = recipe.id.clone();
+                                    ui.push_id(("saved_recipe", recipe_index, recipe_id.clone()), |ui| {
+                                        ui.horizontal(|ui| {
+                                            if ui.button(&recipe.name).clicked() {
+                                                self.load_recipe_into_form(recipe_id.clone());
+                                            }
+                                            if !recipe.prep_minutes.is_empty() {
+                                                ui.label(format!("Prep {} min", recipe.prep_minutes));
+                                            }
+                                            if !recipe.cook_minutes.is_empty() {
+                                                ui.label(format!("Cook {} min", recipe.cook_minutes));
+                                            }
+                                            if !recipe.servings.is_empty() {
+                                                ui.label(format!("Serves {}", recipe.servings));
+                                            }
+                                        });
+                                    });
+                                }
+                            }
+                        });
                 });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+
+    use super::App;
+
+    #[test]
+    fn export_filename_uses_yyyymmdd_prefix() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
+        assert_eq!(App::export_filename_for_date(date), "20261003_PlaTex.json");
+    }
+
+    #[test]
+    fn json_document_round_trips() {
+        let document = super::JsonExportDocument {
+            version: 1,
+            exported_at: "2026-10-03T00:00:00Z".to_string(),
+            recipes: vec![super::JsonRecipe {
+                uuid: Some("b0f0e9ab-5c38-4dc3-9c3f-f9ddc89c0338".to_string()),
+                name: "Tomato Soup".to_string(),
+                description: Some("Warm and simple".to_string()),
+                servings: Some(2),
+                prep_time_minutes: Some(10),
+                cook_time_minutes: Some(20),
+                ingredients: vec![super::JsonIngredient {
+                    group_name: Some("Base".to_string()),
+                    quantity_unit: "2 cups".to_string(),
+                    description: "tomato".to_string(),
+                    optional: false,
+                }],
+                steps: vec![super::JsonStep {
+                    instruction: "Boil and simmer.".to_string(),
+                    optional: false,
+                }],
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&document).unwrap();
+        let parsed: super::JsonExportDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, document);
     }
 }
