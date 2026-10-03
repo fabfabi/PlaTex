@@ -51,6 +51,15 @@ pub struct Step {
     pub sort_order: i64,
 }
 
+/// A recipe with all related data, as loaded for editing or export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeDetail {
+    pub recipe: Recipe,
+    pub ingredients: Vec<Ingredient>,
+    pub steps: Vec<Step>,
+    pub tags: Vec<Tag>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct RecipeTag {
     pub recipe_id: String,

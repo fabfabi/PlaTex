@@ -1,3 +1,5 @@
 /target
 settings.json
 recipes.db
+*.tex
+*.json

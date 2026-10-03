@@ -1,0 +1,216 @@
+% ------------------------------------------------------------
+% PlaTex template "A5 vertical split" (DIN A5, ingredients left, steps right)
+%
+% Exported next to the .tex as platex.sty. Generated .tex files only contain
+% the macros defined here; every template must define all of them.
+%
+%   \Kapitel{name}                       chapter divider page
+%   \begin{Rezept}{title}{icon} ...      one recipe per page;
+%                                        icon file: icons/<icon>.png
+%   \RezeptInfo{servings}{prep}{cook}    any argument may be empty
+%   \Beschreibung{text}
+%   \begin{Zutaten} ... \end{Zutaten}    left column
+%   \begin{Zutatengruppe}{name}          ingredient table, name may be empty
+%   \Zutat{qty}{name}, \OptionaleZutat{qty}{name}
+%   \begin{Zubereitung} ...              right column
+%   \Schritt{text}, \OptionalerSchritt{text}
+% ------------------------------------------------------------
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{platex}
+
+% ------------------------------------------------------------
+% SEITENFORMAT
+% ------------------------------------------------------------
+\RequirePackage[
+    a5paper,
+    top=11mm,
+    bottom=10mm,
+    left=13mm,
+    right=13mm
+]{geometry}
+
+% ------------------------------------------------------------
+% SCHRIFT UND SPRACHE
+% ------------------------------------------------------------
+\RequirePackage[T1]{fontenc}
+\RequirePackage[utf8]{inputenc}
+\RequirePackage[ngerman]{babel}
+\RequirePackage{lmodern}
+
+% Serifenlose Schrift
+\renewcommand{\familydefault}{\sfdefault}
+
+% ------------------------------------------------------------
+% PAKETE
+% ------------------------------------------------------------
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{tabularx}
+\RequirePackage{array}
+\RequirePackage{tikz}
+
+% ------------------------------------------------------------
+% SEITENSTIL
+% ------------------------------------------------------------
+\pagestyle{empty}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+
+% ------------------------------------------------------------
+% FARBEN
+% ------------------------------------------------------------
+\definecolor{kochgruen}{HTML}{3F6B4F}
+\definecolor{kochgruenlinie}{HTML}{C8D5CC}
+\definecolor{textgrau}{HTML}{333333}
+\definecolor{optionalgrau}{HTML}{888888}
+
+\AtBeginDocument{\color{textgrau}}
+
+% True if the argument is empty
+\newcommand{\PlaTexIfEmpty}[3]{%
+    \if\relax\detokenize{#1}\relax #2\else #3\fi
+}
+
+% ------------------------------------------------------------
+% KAPITEL
+% ------------------------------------------------------------
+\newcommand{\Kapitel}[1]{%
+    \clearpage
+    \vspace*{\fill}
+    \begin{center}
+        {\fontsize{25}{28}\selectfont\bfseries\color{kochgruen}#1}
+    \end{center}
+    \vspace*{\fill}
+    \clearpage
+}
+
+% ------------------------------------------------------------
+% REZEPT
+% ------------------------------------------------------------
+\newenvironment{Rezept}[2]{%
+    \clearpage
+    \noindent
+    \begin{minipage}[c]{0.86\textwidth}
+        \resizebox{\linewidth}{!}{%
+            {\fontsize{25}{28}\selectfont
+            \bfseries
+            \color{kochgruen}
+            #1}%
+        }
+    \end{minipage}
+    \hfill
+    \begin{minipage}[c]{0.10\textwidth}
+        \centering
+        \IfFileExists{icons/#2.png}{%
+            \includegraphics[
+                width=9mm,
+                height=9mm,
+                keepaspectratio
+            ]{icons/#2.png}%
+        }{%
+            \begin{tikzpicture}
+                \draw[
+                    kochgruen,
+                    line width=0.7pt
+                ]
+                (0,0) circle (4mm);
+
+                \node[
+                    text=kochgruen,
+                    font=\small\bfseries
+                ] at (0,0) {?};
+            \end{tikzpicture}%
+        }
+    \end{minipage}
+
+    \vspace{3mm}
+
+    % Horizontale Linie
+    \textcolor{kochgruenlinie}{\rule{\textwidth}{0.5pt}}
+
+    \vspace{4mm}
+}{%
+    \clearpage
+}
+
+\newcommand{\RezeptInfo}[3]{%
+    {\small
+    \PlaTexIfEmpty{#1}{}{Portionen: #1\quad}%
+    \PlaTexIfEmpty{#2}{}{Vorbereitung: #2 min\quad}%
+    \PlaTexIfEmpty{#3}{}{Kochzeit: #3 min}%
+    \par}
+    \vspace{2mm}
+}
+
+\newcommand{\Beschreibung}[1]{%
+    {\small\itshape #1\par}
+    \vspace{4mm}
+}
+
+% ------------------------------------------------------------
+% ZUTATEN (linke Spalte)
+% ------------------------------------------------------------
+\newenvironment{Zutaten}{%
+    \noindent
+    \begin{minipage}[t]{0.38\textwidth}
+    \vspace{0pt}
+    \itshape
+}{%
+    \end{minipage}%
+    \hfill
+}
+
+\newenvironment{Zutatengruppe}[1]{%
+    \PlaTexIfEmpty{#1}{}{%
+        {\upshape\small\bfseries\color{kochgruen}#1\par}
+        \vspace{1mm}%
+    }%
+    \tabularx{\linewidth}{
+        @{}
+        >{\raggedleft\arraybackslash}p{17mm}
+        @{\hspace{2mm}}
+        >{\raggedright\arraybackslash}X
+        @{}
+    }
+}{%
+    \endtabularx
+    \par
+    \vspace{4mm}
+}
+
+\newcommand{\Zutat}[2]{#1 & #2 \\[0.9mm]}
+\newcommand{\OptionaleZutat}[2]{%
+    {\color{optionalgrau}#1} & {\color{optionalgrau}#2 (optional)} \\[0.9mm]%
+}
+
+% ------------------------------------------------------------
+% ZUBEREITUNG (rechte Spalte)
+% ------------------------------------------------------------
+\newenvironment{Zubereitung}{%
+    \begin{minipage}[t]{0.58\textwidth}
+    \vspace{0pt}
+    \begin{enumerate}
+        \setlength{\itemsep}{1.7mm}
+        \setlength{\parskip}{0pt}
+        \setlength{\parsep}{0pt}
+        \setlength{\topsep}{0pt}
+        \setlength{\partopsep}{0pt}
+        \setlength{\leftmargin}{0pt}
+        \setlength{\labelwidth}{6mm}
+        \setlength{\labelsep}{1mm}
+        \setlength{\itemindent}{0pt}
+        \setlength{\listparindent}{0pt}
+
+        \renewcommand{\labelenumi}{%
+            \color{kochgruen}\bfseries\theenumi.%
+        }
+}{%
+    \end{enumerate}
+    \end{minipage}
+}
+
+\newcommand{\Schritt}[1]{\item #1}
+\newcommand{\OptionalerSchritt}[1]{\item {\color{optionalgrau}(optional) #1}}
+
+\endinput

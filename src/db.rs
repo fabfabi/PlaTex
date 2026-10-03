@@ -1,6 +1,6 @@
 use sqlx::SqlitePool;
 
-use crate::models::{Ingredient, Recipe, Step, Tag, TagKind};
+use crate::models::{Ingredient, Recipe, RecipeDetail, Step, Tag, TagKind};
 
 pub async fn connect_db(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     SqlitePool::connect(database_url).await
@@ -398,14 +398,6 @@ pub struct IngredientGroupInput {
 pub struct StepInput {
     pub instruction: String,
     pub optional: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecipeDetail {
-    pub recipe: Recipe,
-    pub ingredients: Vec<Ingredient>,
-    pub steps: Vec<Step>,
-    pub tags: Vec<Tag>,
 }
 
 fn split_quantity_and_unit(value: &str) -> (Option<String>, Option<String>) {

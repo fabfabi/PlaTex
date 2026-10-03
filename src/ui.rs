@@ -287,6 +287,7 @@ pub struct App {
     tags: Vec<TagEntry>,
     new_tag_name: String,
     new_tag_kind: TagKind,
+    template_index: usize,
 }
 
 impl App {
@@ -302,6 +303,7 @@ impl App {
             tags: Vec::new(),
             new_tag_name: String::new(),
             new_tag_kind: TagKind::Content,
+            template_index: 0,
         };
         app.refresh_tags();
 
@@ -471,6 +473,36 @@ impl App {
             },
             Err(err) => self.status = err,
         }
+    }
+
+    fn export_latex_file(&mut self) {
+        let file_name = format!("{}_PlaTex.tex", Local::now().date_naive().format("%Y%m%d"));
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&file_name)
+            .add_filter("LaTeX", &["tex"])
+            .save_file()
+        else {
+            self.status = "Export cancelled.".to_string();
+            return;
+        };
+
+        let pool = self.pool.clone();
+        let details = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut details = Vec::new();
+            for recipe in crate::db::list_recipes(&pool).await? {
+                details.push(crate::db::load_recipe_detail(&pool, &recipe.id).await?);
+            }
+            Ok::<_, sqlx::Error>(details)
+        });
+
+        let template = &crate::export::TEMPLATES[self.template_index];
+        self.status = match details {
+            Ok(details) => match crate::export::write_cookbook(&path, template, &details) {
+                Ok(style_path) => format!("Exported LaTeX to {} and {}", path.display(), style_path.display()),
+                Err(err) => format!("Export failed: {err}"),
+            },
+            Err(err) => format!("Export failed: {err}"),
+        };
     }
 
     fn import_json_file(&mut self) {
@@ -815,6 +847,18 @@ impl eframe::App for App {
 
                         if ui.button("Export JSON").clicked() {
                             self.export_json_file();
+                        }
+
+                        let templates = crate::export::TEMPLATES;
+                        egui::ComboBox::from_id_salt("latex_template")
+                            .selected_text(templates[self.template_index].name)
+                            .show_ui(ui, |ui| {
+                                for (index, template) in templates.iter().enumerate() {
+                                    ui.selectable_value(&mut self.template_index, index, template.name);
+                                }
+                            });
+                        if ui.button("Export LaTeX").clicked() {
+                            self.export_latex_file();
                         }
                     });
 
