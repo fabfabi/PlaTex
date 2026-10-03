@@ -1,24 +1,28 @@
 mod db;
 mod models;
+mod ui;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = db::connect_db("sqlite:recipes.db").await?;
-    db::init_db(&pool).await?;
+fn main() -> eframe::Result<()> {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let recipe_id = db::insert_recipe(
-        &pool,
-        "Tomato Pasta",
-        Some("A simple weeknight pasta."),
-        Some(2),
-        Some(10),
-        Some(15),
+    let pool = runtime.block_on(async {
+        let pool = db::connect_db("sqlite:recipes.db").await?;
+        db::init_db(&pool).await?;
+
+        Ok::<_, sqlx::Error>(pool)
+    });
+
+    let pool = match pool {
+        Ok(pool) => pool,
+        Err(err) => panic!("Failed to initialize database: {err}"),
+    };
+
+    let recipe_count = runtime
+        .block_on(async { db::list_recipes(&pool).await.unwrap_or_default().len() });
+
+    eframe::run_native(
+        "PlaTex",
+        eframe::NativeOptions::default(),
+        Box::new(|_cc| Ok(Box::new(ui::App::new(recipe_count)))),
     )
-    .await?;
-
-    let recipes = db::list_recipes(&pool).await?;
-    println!("Recipes found: {}", recipes.len());
-    println!("Inserted recipe id: {}", recipe_id);
-
-    Ok(())
 }
