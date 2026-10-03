@@ -35,6 +35,7 @@
 
 ## Validation and testing
 
+- Run `cargo fmt` after changing Rust code; commits are rejected if `cargo fmt --check` fails.
 - Run the smallest relevant validation command for each change.
 - Do not claim work is complete without validation evidence.
 - For business logic changes, add or update tests before or alongside the fix.

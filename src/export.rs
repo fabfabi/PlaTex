@@ -22,7 +22,11 @@ pub const TEMPLATES: &[Template] = &[Template {
 pub const STYLE_FILE_NAME: &str = "platex.sty";
 
 /// Writes the cookbook to `tex_path` and the template `style` as `platex.sty` beside it.
-pub fn write_cookbook(tex_path: &Path, style: &str, recipes: &[RecipeDetail]) -> io::Result<PathBuf> {
+pub fn write_cookbook(
+    tex_path: &Path,
+    style: &str,
+    recipes: &[RecipeDetail],
+) -> io::Result<PathBuf> {
     let style_path = tex_path.with_file_name(STYLE_FILE_NAME);
     fs::write(tex_path, render_cookbook(recipes))?;
     fs::write(&style_path, style)?;
@@ -83,9 +87,18 @@ pub fn render_recipe(detail: &RecipeDetail) -> String {
         .unwrap_or_default();
 
     let mut out = String::new();
-    writeln!(out, r"\begin{{Rezept}}{{{}}}{{{}}}", escape_latex(&recipe.name), icon).unwrap();
+    writeln!(
+        out,
+        r"\begin{{Rezept}}{{{}}}{{{}}}",
+        escape_latex(&recipe.name),
+        icon
+    )
+    .unwrap();
 
-    if recipe.servings.is_some() || recipe.prep_time_minutes.is_some() || recipe.cook_time_minutes.is_some() {
+    if recipe.servings.is_some()
+        || recipe.prep_time_minutes.is_some()
+        || recipe.cook_time_minutes.is_some()
+    {
         writeln!(
             out,
             r"  \RezeptInfo{{{}}}{{{}}}{{{}}}",
@@ -96,7 +109,12 @@ pub fn render_recipe(detail: &RecipeDetail) -> String {
         .unwrap();
     }
 
-    if let Some(description) = recipe.description.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+    if let Some(description) = recipe
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
         writeln!(out, r"  \Beschreibung{{{}}}", escape_latex(description)).unwrap();
     }
 
@@ -110,10 +128,19 @@ pub fn render_recipe(detail: &RecipeDetail) -> String {
                 if current_group.is_some() {
                     writeln!(out, r"    \end{{Zutatengruppe}}").unwrap();
                 }
-                writeln!(out, r"    \begin{{Zutatengruppe}}{{{}}}", escape_latex(group.unwrap_or_default())).unwrap();
+                writeln!(
+                    out,
+                    r"    \begin{{Zutatengruppe}}{{{}}}",
+                    escape_latex(group.unwrap_or_default())
+                )
+                .unwrap();
                 current_group = Some(group);
             }
-            let command = if ingredient.optional { "OptionaleZutat" } else { "Zutat" };
+            let command = if ingredient.optional {
+                "OptionaleZutat"
+            } else {
+                "Zutat"
+            };
             writeln!(
                 out,
                 r"      \{}{{{}}}{{{}}}",
@@ -130,8 +157,18 @@ pub fn render_recipe(detail: &RecipeDetail) -> String {
     if !detail.steps.is_empty() {
         writeln!(out, r"  \begin{{Zubereitung}}").unwrap();
         for step in &detail.steps {
-            let command = if step.optional { "OptionalerSchritt" } else { "Schritt" };
-            writeln!(out, r"    \{}{{{}}}", command, escape_latex(&step.instruction)).unwrap();
+            let command = if step.optional {
+                "OptionalerSchritt"
+            } else {
+                "Schritt"
+            };
+            writeln!(
+                out,
+                r"    \{}{{{}}}",
+                command,
+                escape_latex(&step.instruction)
+            )
+            .unwrap();
         }
         writeln!(out, r"  \end{{Zubereitung}}").unwrap();
     }
@@ -174,13 +211,19 @@ pub fn render_cookbook(recipes: &[RecipeDetail]) -> String {
     for chapter in chapters {
         writeln!(out).unwrap();
         writeln!(out, r"\Kapitel{{{}}}", escape_latex(&chapter.name)).unwrap();
-        for detail in sorted.iter().filter(|detail| has_chapter(detail, Some(&chapter.id))) {
+        for detail in sorted
+            .iter()
+            .filter(|detail| has_chapter(detail, Some(&chapter.id)))
+        {
             writeln!(out).unwrap();
             out.push_str(&render_recipe(detail));
         }
     }
 
-    let without_chapter = sorted.iter().filter(|detail| !has_chapter(detail, None)).collect::<Vec<_>>();
+    let without_chapter = sorted
+        .iter()
+        .filter(|detail| !has_chapter(detail, None))
+        .collect::<Vec<_>>();
     if !without_chapter.is_empty() {
         writeln!(out).unwrap();
         writeln!(out, r"\Kapitel{{{}}}", OTHER_CHAPTER_NAME).unwrap();
@@ -209,7 +252,13 @@ mod tests {
         }
     }
 
-    fn ingredient(group: Option<&str>, quantity: Option<&str>, unit: Option<&str>, name: &str, optional: bool) -> Ingredient {
+    fn ingredient(
+        group: Option<&str>,
+        quantity: Option<&str>,
+        unit: Option<&str>,
+        name: &str,
+        optional: bool,
+    ) -> Ingredient {
         Ingredient {
             id: 0,
             recipe_id: "r".to_string(),
@@ -264,7 +313,10 @@ mod tests {
     fn render_recipe_fills_all_sections() {
         let mut detail = recipe(
             "Pasta & Sauce",
-            vec![tag("c1", "Mains", TagKind::Chapter, 0), tag("t1", "Vegan", TagKind::Content, 0)],
+            vec![
+                tag("c1", "Mains", TagKind::Chapter, 0),
+                tag("t1", "Vegan", TagKind::Content, 0),
+            ],
         );
         detail.recipe.description = Some("Quick".to_string());
         detail.recipe.servings = Some(2);
@@ -329,7 +381,9 @@ mod tests {
         ];
         let mut position = 0;
         for needle in order {
-            let found = rendered[position..].find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+            let found = rendered[position..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"));
             position += found + needle.len();
         }
         assert_eq!(rendered.matches(r"\Kapitel{").count(), 3);
@@ -338,7 +392,10 @@ mod tests {
 
     #[test]
     fn render_cookbook_omits_other_chapter_when_all_recipes_have_chapters() {
-        let rendered = render_cookbook(&[recipe("Suppe", vec![tag("c1", "Suppen", TagKind::Chapter, 0)])]);
+        let rendered = render_cookbook(&[recipe(
+            "Suppe",
+            vec![tag("c1", "Suppen", TagKind::Chapter, 0)],
+        )]);
         assert!(!rendered.contains(r"\Kapitel{Sonstige}"));
     }
 
@@ -348,10 +405,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let tex_path = dir.join("book.tex");
 
-        let style_path = write_cookbook(&tex_path, TEMPLATES[0].style, &[recipe("Brot", vec![])]).unwrap();
+        let style_path =
+            write_cookbook(&tex_path, TEMPLATES[0].style, &[recipe("Brot", vec![])]).unwrap();
 
         assert_eq!(style_path, dir.join("platex.sty"));
-        assert!(fs::read_to_string(&tex_path).unwrap().contains(r"\begin{Rezept}{Brot}"));
+        assert!(fs::read_to_string(&tex_path)
+            .unwrap()
+            .contains(r"\begin{Rezept}{Brot}"));
         assert_eq!(fs::read_to_string(&style_path).unwrap(), TEMPLATES[0].style);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -359,7 +419,12 @@ mod tests {
     #[test]
     fn every_built_in_template_passes_check() {
         for template in TEMPLATES {
-            assert_eq!(crate::template_check::check_template(template.style), Ok(()), "{}", template.name);
+            assert_eq!(
+                crate::template_check::check_template(template.style),
+                Ok(()),
+                "{}",
+                template.name
+            );
         }
     }
 
@@ -377,16 +442,25 @@ mod tests {
 
         let standard = ["documentclass", "usepackage", "begin", "end"];
         for token in rendered.split('\\').skip(1) {
-            let name = token.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>();
+            let name = token
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect::<String>();
             if name.is_empty() || standard.contains(&name.as_str()) {
                 continue;
             }
-            assert!(crate::template_check::REQUIRED_COMMANDS.contains(&name.as_str()), "\\{name} is not checked");
+            assert!(
+                crate::template_check::REQUIRED_COMMANDS.contains(&name.as_str()),
+                "\\{name} is not checked"
+            );
         }
         for token in rendered.split(r"\begin{").skip(1) {
             let name = &token[..token.find('}').unwrap()];
             if name != "document" {
-                assert!(crate::template_check::REQUIRED_ENVIRONMENTS.contains(&name), "{name} is not checked");
+                assert!(
+                    crate::template_check::REQUIRED_ENVIRONMENTS.contains(&name),
+                    "{name} is not checked"
+                );
             }
         }
     }

@@ -138,32 +138,54 @@ mod tests {
             .replace("\\newenvironment{Zutaten}", "\\newenvironment{Ingredients}");
         assert_eq!(
             check_template(&style),
-            Err(vec!["command \\Schritt".to_string(), "environment Zutaten".to_string()])
+            Err(vec![
+                "command \\Schritt".to_string(),
+                "environment Zutaten".to_string()
+            ])
         );
     }
 
     #[test]
     fn longer_names_do_not_count() {
         let style = complete_template().replace("\\newcommand{\\Zutat}", "\\newcommand{\\ZutatX}");
-        assert_eq!(check_template(&style), Err(vec!["command \\Zutat".to_string()]));
+        assert_eq!(
+            check_template(&style),
+            Err(vec!["command \\Zutat".to_string()])
+        );
     }
 
     #[test]
     fn commented_out_definitions_do_not_count() {
-        let style = complete_template().replace("\\newcommand{\\Kapitel}", "% \\newcommand{\\Kapitel}");
-        assert_eq!(check_template(&style), Err(vec!["command \\Kapitel".to_string()]));
+        let style =
+            complete_template().replace("\\newcommand{\\Kapitel}", "% \\newcommand{\\Kapitel}");
+        assert_eq!(
+            check_template(&style),
+            Err(vec!["command \\Kapitel".to_string()])
+        );
     }
 
     #[test]
     fn alternative_definition_forms_are_accepted() {
         assert!(defines_command("\\def\\Zutat#1#2{}", "Zutat"));
-        assert!(defines_command("\\NewDocumentCommand{\\Zutat}{mm}{}", "Zutat"));
+        assert!(defines_command(
+            "\\NewDocumentCommand{\\Zutat}{mm}{}",
+            "Zutat"
+        ));
         assert!(defines_command("\\newcommand*\\Zutat[2]{}", "Zutat"));
         assert!(defines_command("\\renewcommand { \\Zutat }{}", "Zutat"));
         assert!(!defines_command("\\definecolor\\Zutat", "Zutat"));
-        assert!(defines_environment("\\NewDocumentEnvironment{Rezept}{mm}{}{}", "Rezept"));
-        assert!(defines_environment("\\newenvironment{ Rezept }{}{}", "Rezept"));
-        assert!(!defines_environment("\\newenvironment{Rezepte}{}{}", "Rezept"));
+        assert!(defines_environment(
+            "\\NewDocumentEnvironment{Rezept}{mm}{}{}",
+            "Rezept"
+        ));
+        assert!(defines_environment(
+            "\\newenvironment{ Rezept }{}{}",
+            "Rezept"
+        ));
+        assert!(!defines_environment(
+            "\\newenvironment{Rezepte}{}{}",
+            "Rezept"
+        ));
     }
 
     #[test]

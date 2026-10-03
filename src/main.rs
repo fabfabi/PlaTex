@@ -12,7 +12,9 @@ fn main() -> eframe::Result<()> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
     let db_path = exe_dir.join("recipes.db");
 
     let pool = runtime.block_on(async {
@@ -31,8 +33,8 @@ fn main() -> eframe::Result<()> {
     };
     let pool = Arc::new(pool);
 
-    let recipes = runtime
-        .block_on(async { db::list_recipe_summaries(&pool).await.unwrap_or_default() });
+    let recipes =
+        runtime.block_on(async { db::list_recipe_summaries(&pool).await.unwrap_or_default() });
 
     eframe::run_native(
         "PlaTex",

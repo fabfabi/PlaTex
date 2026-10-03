@@ -16,7 +16,11 @@ fn main() {
         if path.extension().is_some_and(|extension| extension == "sty") {
             let style = fs::read_to_string(&path).expect("cannot read template");
             if let Err(missing) = template_check::check_template(&style) {
-                errors.push(format!("{}: missing {}", path.display(), missing.join(", ")));
+                errors.push(format!(
+                    "{}: missing {}",
+                    path.display(),
+                    missing.join(", ")
+                ));
             }
         }
     }

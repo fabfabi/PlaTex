@@ -127,11 +127,15 @@ async fn build_export_document(pool: &sqlx::SqlitePool) -> Result<JsonExportDocu
         })
         .collect();
 
-    let recipes = crate::db::list_recipes(pool).await.map_err(|err| err.to_string())?;
+    let recipes = crate::db::list_recipes(pool)
+        .await
+        .map_err(|err| err.to_string())?;
     let mut exported = Vec::new();
 
     for recipe in recipes {
-        let detail = crate::db::load_recipe_detail(pool, &recipe.id).await.map_err(|err| err.to_string())?;
+        let detail = crate::db::load_recipe_detail(pool, &recipe.id)
+            .await
+            .map_err(|err| err.to_string())?;
         let ingredients = detail
             .ingredients
             .into_iter()
@@ -221,8 +225,13 @@ async fn import_document(
 
     let mut imported = 0usize;
     for recipe in document.recipes {
-        let recipe_uuid = recipe.uuid.as_deref().filter(|value| !value.trim().is_empty());
-        if mode == ImportMode::OnlyAddNew && recipe_uuid.is_some_and(|uuid| existing_ids.contains(uuid)) {
+        let recipe_uuid = recipe
+            .uuid
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        if mode == ImportMode::OnlyAddNew
+            && recipe_uuid.is_some_and(|uuid| existing_ids.contains(uuid))
+        {
             continue;
         }
 
@@ -267,7 +276,10 @@ async fn import_document(
         .await;
 
         if let Ok(id) = saved {
-            if crate::db::set_recipe_tags(pool, &id, &tag_ids).await.is_ok() {
+            if crate::db::set_recipe_tags(pool, &id, &tag_ids)
+                .await
+                .is_ok()
+            {
                 imported += 1;
             }
         }
@@ -343,9 +355,18 @@ impl App {
             .map(|recipe| RecipeSummary {
                 id: recipe.id,
                 name: recipe.name,
-                prep_minutes: recipe.prep_time_minutes.map(|value| value.to_string()).unwrap_or_default(),
-                cook_minutes: recipe.cook_time_minutes.map(|value| value.to_string()).unwrap_or_default(),
-                servings: recipe.servings.map(|value| value.to_string()).unwrap_or_default(),
+                prep_minutes: recipe
+                    .prep_time_minutes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                cook_minutes: recipe
+                    .cook_time_minutes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                servings: recipe
+                    .servings
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -354,18 +375,29 @@ impl App {
 
     fn refresh_recipe_list(&mut self) {
         let pool = self.pool.clone();
-        let recipes = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { crate::db::list_recipe_summaries(&pool).await.unwrap_or_default() });
+        let recipes = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            crate::db::list_recipe_summaries(&pool)
+                .await
+                .unwrap_or_default()
+        });
 
         self.recipes = recipes
             .into_iter()
             .map(|recipe| RecipeSummary {
                 id: recipe.id,
                 name: recipe.name,
-                prep_minutes: recipe.prep_time_minutes.map(|value| value.to_string()).unwrap_or_default(),
-                cook_minutes: recipe.cook_time_minutes.map(|value| value.to_string()).unwrap_or_default(),
-                servings: recipe.servings.map(|value| value.to_string()).unwrap_or_default(),
+                prep_minutes: recipe
+                    .prep_time_minutes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                cook_minutes: recipe
+                    .cook_time_minutes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                servings: recipe
+                    .servings
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
             })
             .collect();
     }
@@ -468,7 +500,8 @@ impl App {
         let document = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(build_export_document(&pool))?;
-        serde_json::to_string_pretty(&document).map_err(|err| format!("Failed to encode JSON: {err}"))
+        serde_json::to_string_pretty(&document)
+            .map_err(|err| format!("Failed to encode JSON: {err}"))
     }
 
     fn export_json_file(&mut self) {
@@ -523,7 +556,11 @@ impl App {
         };
         self.status = match details {
             Ok(details) => match crate::export::write_cookbook(&path, style, &details) {
-                Ok(style_path) => format!("Exported LaTeX to {} and {}", path.display(), style_path.display()),
+                Ok(style_path) => format!(
+                    "Exported LaTeX to {} and {}",
+                    path.display(),
+                    style_path.display()
+                ),
                 Err(err) => format!("Export failed: {err}"),
             },
             Err(err) => format!("Export failed: {err}"),
@@ -531,7 +568,10 @@ impl App {
     }
 
     fn upload_template(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("LaTeX style", &["sty"]).pick_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("LaTeX style", &["sty"])
+            .pick_file()
+        else {
             return;
         };
 
@@ -569,7 +609,11 @@ impl App {
             .show(ctx, |ui| {
                 ui.label("Template");
                 for (index, template) in crate::export::TEMPLATES.iter().enumerate() {
-                    ui.radio_value(&mut self.template_choice, TemplateChoice::BuiltIn(index), template.name);
+                    ui.radio_value(
+                        &mut self.template_choice,
+                        TemplateChoice::BuiltIn(index),
+                        template.name,
+                    );
                 }
                 ui.horizontal(|ui| {
                     let label = match &self.uploaded_template {
@@ -646,7 +690,11 @@ impl App {
                 self.selected_recipe_id = Some(recipe_id.clone());
                 self.recipe.name = detail.recipe.name;
                 self.recipe.description = detail.recipe.description.unwrap_or_default();
-                self.recipe.servings = detail.recipe.servings.map(|value| value.to_string()).unwrap_or_default();
+                self.recipe.servings = detail
+                    .recipe
+                    .servings
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
                 self.recipe.prep_minutes = detail
                     .recipe
                     .prep_time_minutes
@@ -662,7 +710,10 @@ impl App {
                 self.recipe.groups.clear();
                 let mut groups: Vec<IngredientGroup> = Vec::new();
                 for ingredient in detail.ingredients {
-                    let group_name = ingredient.group_name.clone().unwrap_or_else(|| "Base".to_string());
+                    let group_name = ingredient
+                        .group_name
+                        .clone()
+                        .unwrap_or_else(|| "Base".to_string());
                     let quantity = ingredient.quantity.unwrap_or_default();
                     let unit = ingredient.unit.unwrap_or_default();
                     let quantity_unit = if quantity.is_empty() && unit.is_empty() {
@@ -870,8 +921,14 @@ impl eframe::App for App {
                                         } else {
                                             Some(crate::db::IngredientGroupInput {
                                                 group_name: Some(group.name.trim().to_string()),
-                                                quantity_unit: ingredient.quantity_unit.trim().to_string(),
-                                                description: ingredient.description.trim().to_string(),
+                                                quantity_unit: ingredient
+                                                    .quantity_unit
+                                                    .trim()
+                                                    .to_string(),
+                                                description: ingredient
+                                                    .description
+                                                    .trim()
+                                                    .to_string(),
                                                 optional: ingredient.optional,
                                             })
                                         }
@@ -892,9 +949,8 @@ impl eframe::App for App {
 
                             let saved_name = name.to_string();
                             let tag_ids = self.recipe.tag_ids.iter().cloned().collect::<Vec<_>>();
-                            let saved_id = tokio::runtime::Runtime::new()
-                                .unwrap()
-                                .block_on(async {
+                            let saved_id =
+                                tokio::runtime::Runtime::new().unwrap().block_on(async {
                                     let id = crate::db::upsert_recipe_with_details(
                                         &self.pool,
                                         self.selected_recipe_id.as_deref(),
@@ -904,21 +960,9 @@ impl eframe::App for App {
                                         } else {
                                             Some(self.recipe.description.trim())
                                         },
-                                        self.recipe
-                                            .servings
-                                            .trim()
-                                            .parse::<i64>()
-                                            .ok(),
-                                        self.recipe
-                                            .prep_minutes
-                                            .trim()
-                                            .parse::<i64>()
-                                            .ok(),
-                                        self.recipe
-                                            .cook_minutes
-                                            .trim()
-                                            .parse::<i64>()
-                                            .ok(),
+                                        self.recipe.servings.trim().parse::<i64>().ok(),
+                                        self.recipe.prep_minutes.trim().parse::<i64>().ok(),
+                                        self.recipe.cook_minutes.trim().parse::<i64>().ok(),
                                         &groups,
                                         &steps,
                                     )
@@ -948,8 +992,16 @@ impl eframe::App for App {
 
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.import_mode, ImportMode::OnlyAddNew, "Only add new recipes");
-                        ui.radio_value(&mut self.import_mode, ImportMode::OverwriteChanges, "Overwrite changes");
+                        ui.radio_value(
+                            &mut self.import_mode,
+                            ImportMode::OnlyAddNew,
+                            "Only add new recipes",
+                        );
+                        ui.radio_value(
+                            &mut self.import_mode,
+                            ImportMode::OverwriteChanges,
+                            "Overwrite changes",
+                        );
                         if ui.button("Import JSON").clicked() {
                             self.import_json_file();
                         }
@@ -962,7 +1014,10 @@ impl eframe::App for App {
                             let mut add_tag = false;
                             ui.horizontal(|ui| {
                                 ui.label("New tag");
-                                ui.add(egui::TextEdit::singleline(&mut self.new_tag_name).desired_width(180.0));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.new_tag_name)
+                                        .desired_width(180.0),
+                                );
                                 ui.radio_value(&mut self.new_tag_kind, TagKind::Chapter, "Chapter");
                                 ui.radio_value(&mut self.new_tag_kind, TagKind::Content, "Content");
                                 add_tag = ui.button("Add tag").clicked();
@@ -972,19 +1027,29 @@ impl eframe::App for App {
                             }
 
                             let mut actions = Vec::new();
-                            for (kind, heading) in [(TagKind::Chapter, "Chapters (in order)"), (TagKind::Content, "Content tags")] {
+                            for (kind, heading) in [
+                                (TagKind::Chapter, "Chapters (in order)"),
+                                (TagKind::Content, "Content tags"),
+                            ] {
                                 ui.label(heading);
-                                let entries = self.tags.iter_mut().filter(|entry| entry.tag.kind == kind);
+                                let entries =
+                                    self.tags.iter_mut().filter(|entry| entry.tag.kind == kind);
                                 let mut count = 0;
                                 for (index, entry) in entries.enumerate() {
                                     count += 1;
                                     ui.push_id(("tag", entry.tag.id.clone()), |ui| {
                                         ui.horizontal(|ui| {
                                             let response = ui.add(
-                                                egui::TextEdit::singleline(&mut entry.edit_name).desired_width(180.0),
+                                                egui::TextEdit::singleline(&mut entry.edit_name)
+                                                    .desired_width(180.0),
                                             );
-                                            if response.lost_focus() && entry.edit_name != entry.tag.name {
-                                                actions.push(TagAction::Rename(entry.tag.id.clone(), entry.edit_name.clone()));
+                                            if response.lost_focus()
+                                                && entry.edit_name != entry.tag.name
+                                            {
+                                                actions.push(TagAction::Rename(
+                                                    entry.tag.id.clone(),
+                                                    entry.edit_name.clone(),
+                                                ));
                                             }
                                             if kind == TagKind::Chapter {
                                                 if ui.button("up").clicked() && index > 0 {
@@ -995,7 +1060,8 @@ impl eframe::App for App {
                                                 }
                                             }
                                             if ui.button("Delete").clicked() {
-                                                actions.push(TagAction::Delete(entry.tag.id.clone()));
+                                                actions
+                                                    .push(TagAction::Delete(entry.tag.id.clone()));
                                             }
                                         });
                                     });
@@ -1013,26 +1079,35 @@ impl eframe::App for App {
 
                     ui.horizontal(|ui| {
                         ui.label("Recipe name");
-                        ui.add(egui::TextEdit::singleline(&mut self.recipe.name).desired_width(220.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.recipe.name).desired_width(220.0),
+                        );
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Servings");
-                        ui.add(egui::TextEdit::singleline(&mut self.recipe.servings).desired_width(80.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.recipe.servings)
+                                .desired_width(80.0),
+                        );
                         ui.label("Prep time");
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.recipe.prep_minutes).desired_width(80.0),
+                            egui::TextEdit::singleline(&mut self.recipe.prep_minutes)
+                                .desired_width(80.0),
                         );
                         ui.label("Cook time");
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.recipe.cook_minutes).desired_width(80.0),
+                            egui::TextEdit::singleline(&mut self.recipe.cook_minutes)
+                                .desired_width(80.0),
                         );
                     });
 
                     ui.label("Description");
                     ui.add(egui::TextEdit::multiline(&mut self.recipe.description).desired_rows(4));
 
-                    for (kind, label) in [(TagKind::Chapter, "Chapters"), (TagKind::Content, "Tags")] {
+                    for (kind, label) in
+                        [(TagKind::Chapter, "Chapters"), (TagKind::Content, "Tags")]
+                    {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(label);
                             for entry in self.tags.iter().filter(|entry| entry.tag.kind == kind) {
@@ -1063,17 +1138,26 @@ impl eframe::App for App {
                                 let mut add_ingredient = false;
                                 let mut remove_group = false;
 
-                                ui.push_id(("ingredient_group", self.recipe.groups[group_index].id), |ui| {
-                                    ui.horizontal(|ui| {
-                                        let group = &mut self.recipe.groups[group_index];
-                                        ui.label("Group");
-                                        ui.add(egui::TextEdit::singleline(&mut group.name).desired_width(180.0));
-                                        move_group_up = ui.button("up").clicked() && group_index > 0;
-                                        move_group_down = ui.button("down").clicked() && group_index + 1 < group_count;
-                                        add_ingredient = ui.button("Add ingredient").clicked();
-                                        remove_group = ui.button("Remove group").clicked() && group_count > 1;
-                                    });
-                                });
+                                ui.push_id(
+                                    ("ingredient_group", self.recipe.groups[group_index].id),
+                                    |ui| {
+                                        ui.horizontal(|ui| {
+                                            let group = &mut self.recipe.groups[group_index];
+                                            ui.label("Group");
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut group.name)
+                                                    .desired_width(180.0),
+                                            );
+                                            move_group_up =
+                                                ui.button("up").clicked() && group_index > 0;
+                                            move_group_down = ui.button("down").clicked()
+                                                && group_index + 1 < group_count;
+                                            add_ingredient = ui.button("Add ingredient").clicked();
+                                            remove_group = ui.button("Remove group").clicked()
+                                                && group_count > 1;
+                                        });
+                                    },
+                                );
 
                                 if move_group_up {
                                     self.move_group(group_index, -1);
@@ -1092,32 +1176,54 @@ impl eframe::App for App {
                                 let mut ingredient_move_actions = Vec::new();
 
                                 ui.vertical(|ui| {
-                                    let ingredient_count = self.recipe.groups[group_index].ingredients.len();
+                                    let ingredient_count =
+                                        self.recipe.groups[group_index].ingredients.len();
                                     for ingredient_index in 0..ingredient_count {
                                         let mut move_ingredient_up = false;
                                         let mut move_ingredient_down = false;
                                         let mut remove_ingredient = false;
 
-                                        ui.push_id(("ingredient", self.recipe.groups[group_index].id, self.recipe.groups[group_index].ingredients[ingredient_index].id), |ui| {
-                                            ui.horizontal(|ui| {
-                                                let ingredient =
-                                                    &mut self.recipe.groups[group_index].ingredients[ingredient_index];
-                                                ui.add(
-                                                    egui::TextEdit::singleline(&mut ingredient.quantity_unit)
+                                        ui.push_id(
+                                            (
+                                                "ingredient",
+                                                self.recipe.groups[group_index].id,
+                                                self.recipe.groups[group_index].ingredients
+                                                    [ingredient_index]
+                                                    .id,
+                                            ),
+                                            |ui| {
+                                                ui.horizontal(|ui| {
+                                                    let ingredient = &mut self.recipe.groups
+                                                        [group_index]
+                                                        .ingredients[ingredient_index];
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut ingredient.quantity_unit,
+                                                        )
                                                         .desired_width(150.0),
-                                                );
-                                                ui.add(
-                                                    egui::TextEdit::singleline(&mut ingredient.description)
+                                                    );
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut ingredient.description,
+                                                        )
                                                         .desired_width(240.0),
-                                                );
-                                                ui.checkbox(&mut ingredient.optional, "Optional");
-                                                move_ingredient_up = ui.button("up").clicked() && ingredient_index > 0;
-                                                move_ingredient_down = ui.button("down").clicked()
-                                                    && ingredient_index + 1 < ingredient_count;
-                                                remove_ingredient =
-                                                    ui.button("Remove").clicked() && ingredient_count > 1;
-                                            });
-                                        });
+                                                    );
+                                                    ui.checkbox(
+                                                        &mut ingredient.optional,
+                                                        "Optional",
+                                                    );
+                                                    move_ingredient_up = ui.button("up").clicked()
+                                                        && ingredient_index > 0;
+                                                    move_ingredient_down = ui
+                                                        .button("down")
+                                                        .clicked()
+                                                        && ingredient_index + 1 < ingredient_count;
+                                                    remove_ingredient =
+                                                        ui.button("Remove").clicked()
+                                                            && ingredient_count > 1;
+                                                });
+                                            },
+                                        );
 
                                         if move_ingredient_up {
                                             ingredient_move_actions.push((ingredient_index, -1));
@@ -1134,7 +1240,9 @@ impl eframe::App for App {
                                 for (ingredient_index, direction) in ingredient_move_actions {
                                     self.move_ingredient(group_index, ingredient_index, direction);
                                 }
-                                for ingredient_index in ingredient_indexes_to_remove.into_iter().rev() {
+                                for ingredient_index in
+                                    ingredient_indexes_to_remove.into_iter().rev()
+                                {
                                     if self.recipe.groups[group_index].ingredients.len() > 1 {
                                         self.recipe.groups[group_index]
                                             .ingredients
@@ -1168,21 +1276,29 @@ impl eframe::App for App {
                                 let mut move_step_down = false;
                                 let mut remove_step = false;
 
-                                ui.push_id(("preparation_step", self.recipe.steps[step_index].id), |ui| {
-                                    ui.horizontal(|ui| {
-                                        let step = &mut self.recipe.steps[step_index];
-                                        ui.label(format!("Step {}", step_index + 1));
-                                        ui.checkbox(&mut step.optional, "Optional");
-                                        move_step_up = ui.button("up").clicked() && step_index > 0;
-                                        move_step_down = ui.button("down").clicked() && step_index + 1 < step_count;
-                                        remove_step = ui.button("Remove").clicked() && step_count > 1;
-                                    });
+                                ui.push_id(
+                                    ("preparation_step", self.recipe.steps[step_index].id),
+                                    |ui| {
+                                        ui.horizontal(|ui| {
+                                            let step = &mut self.recipe.steps[step_index];
+                                            ui.label(format!("Step {}", step_index + 1));
+                                            ui.checkbox(&mut step.optional, "Optional");
+                                            move_step_up =
+                                                ui.button("up").clicked() && step_index > 0;
+                                            move_step_down = ui.button("down").clicked()
+                                                && step_index + 1 < step_count;
+                                            remove_step =
+                                                ui.button("Remove").clicked() && step_count > 1;
+                                        });
 
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut self.recipe.steps[step_index].instruction)
+                                        ui.add(
+                                            egui::TextEdit::multiline(
+                                                &mut self.recipe.steps[step_index].instruction,
+                                            )
                                             .desired_rows(3),
-                                    );
-                                });
+                                        );
+                                    },
+                                );
 
                                 if move_step_up {
                                     self.move_step(step_index, -1);
@@ -1219,24 +1335,35 @@ impl eframe::App for App {
                             if self.recipes.is_empty() {
                                 ui.label("No recipes yet.");
                             } else {
-                                for (recipe_index, recipe) in self.recipes.clone().into_iter().enumerate() {
+                                for (recipe_index, recipe) in
+                                    self.recipes.clone().into_iter().enumerate()
+                                {
                                     let recipe_id = recipe.id.clone();
-                                    ui.push_id(("saved_recipe", recipe_index, recipe_id.clone()), |ui| {
-                                        ui.horizontal(|ui| {
-                                            if ui.button(&recipe.name).clicked() {
-                                                self.load_recipe_into_form(recipe_id.clone());
-                                            }
-                                            if !recipe.prep_minutes.is_empty() {
-                                                ui.label(format!("Prep {} min", recipe.prep_minutes));
-                                            }
-                                            if !recipe.cook_minutes.is_empty() {
-                                                ui.label(format!("Cook {} min", recipe.cook_minutes));
-                                            }
-                                            if !recipe.servings.is_empty() {
-                                                ui.label(format!("Serves {}", recipe.servings));
-                                            }
-                                        });
-                                    });
+                                    ui.push_id(
+                                        ("saved_recipe", recipe_index, recipe_id.clone()),
+                                        |ui| {
+                                            ui.horizontal(|ui| {
+                                                if ui.button(&recipe.name).clicked() {
+                                                    self.load_recipe_into_form(recipe_id.clone());
+                                                }
+                                                if !recipe.prep_minutes.is_empty() {
+                                                    ui.label(format!(
+                                                        "Prep {} min",
+                                                        recipe.prep_minutes
+                                                    ));
+                                                }
+                                                if !recipe.cook_minutes.is_empty() {
+                                                    ui.label(format!(
+                                                        "Cook {} min",
+                                                        recipe.cook_minutes
+                                                    ));
+                                                }
+                                                if !recipe.servings.is_empty() {
+                                                    ui.label(format!("Serves {}", recipe.servings));
+                                                }
+                                            });
+                                        },
+                                    );
                                 }
                             }
                         });
@@ -1335,9 +1462,15 @@ mod tests {
     #[tokio::test]
     async fn export_then_import_keeps_tags_and_uuids() {
         let source = test_pool().await;
-        let tag_id = crate::db::create_tag(&source, "Soups", super::TagKind::Chapter).await.unwrap();
-        let recipe_id = crate::db::insert_recipe(&source, "Soup", None, None, None, None).await.unwrap();
-        crate::db::set_recipe_tags(&source, &recipe_id, &[tag_id.clone()]).await.unwrap();
+        let tag_id = crate::db::create_tag(&source, "Soups", super::TagKind::Chapter)
+            .await
+            .unwrap();
+        let recipe_id = crate::db::insert_recipe(&source, "Soup", None, None, None, None)
+            .await
+            .unwrap();
+        crate::db::set_recipe_tags(&source, &recipe_id, &[tag_id.clone()])
+            .await
+            .unwrap();
 
         let document = super::build_export_document(&source).await.unwrap();
         let target = test_pool().await;
@@ -1345,7 +1478,9 @@ mod tests {
             .await
             .unwrap();
 
-        let tags = crate::db::list_tags_for_recipe(&target, &recipe_id).await.unwrap();
+        let tags = crate::db::list_tags_for_recipe(&target, &recipe_id)
+            .await
+            .unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].id, tag_id);
         assert_eq!(tags[0].name, "Soups");
@@ -1355,33 +1490,55 @@ mod tests {
     #[tokio::test]
     async fn only_add_new_keeps_existing_tags_and_recipes() {
         let pool = test_pool().await;
-        super::import_document(&pool, tagged_document("Soups", "Soup"), super::ImportMode::OnlyAddNew)
-            .await
-            .unwrap();
+        super::import_document(
+            &pool,
+            tagged_document("Soups", "Soup"),
+            super::ImportMode::OnlyAddNew,
+        )
+        .await
+        .unwrap();
 
-        let imported = super::import_document(&pool, tagged_document("Stews", "Stew"), super::ImportMode::OnlyAddNew)
-            .await
-            .unwrap();
+        let imported = super::import_document(
+            &pool,
+            tagged_document("Stews", "Stew"),
+            super::ImportMode::OnlyAddNew,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(imported, 0);
         assert_eq!(crate::db::list_tags(&pool).await.unwrap()[0].name, "Soups");
-        assert_eq!(crate::db::list_recipes(&pool).await.unwrap()[0].name, "Soup");
+        assert_eq!(
+            crate::db::list_recipes(&pool).await.unwrap()[0].name,
+            "Soup"
+        );
     }
 
     #[tokio::test]
     async fn overwrite_changes_updates_tags_and_skips_unknown_tag_refs() {
         let pool = test_pool().await;
-        super::import_document(&pool, tagged_document("Soups", "Soup"), super::ImportMode::OverwriteChanges)
-            .await
-            .unwrap();
-        super::import_document(&pool, tagged_document("Stews", "Stew"), super::ImportMode::OverwriteChanges)
-            .await
-            .unwrap();
+        super::import_document(
+            &pool,
+            tagged_document("Soups", "Soup"),
+            super::ImportMode::OverwriteChanges,
+        )
+        .await
+        .unwrap();
+        super::import_document(
+            &pool,
+            tagged_document("Stews", "Stew"),
+            super::ImportMode::OverwriteChanges,
+        )
+        .await
+        .unwrap();
 
         let tags = crate::db::list_tags_for_recipe(&pool, "r1").await.unwrap();
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].name, "Stews");
         assert_eq!(crate::db::list_tags(&pool).await.unwrap().len(), 1);
-        assert_eq!(crate::db::list_recipes(&pool).await.unwrap()[0].name, "Stew");
+        assert_eq!(
+            crate::db::list_recipes(&pool).await.unwrap()[0].name,
+            "Stew"
+        );
     }
 }

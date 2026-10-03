@@ -14,9 +14,10 @@ type LegacyTagLink = (String, i64);
 async fn take_legacy_integer_tags(
     pool: &SqlitePool,
 ) -> Result<Option<(Vec<LegacyTag>, Vec<LegacyTagLink>)>, sqlx::Error> {
-    let columns = sqlx::query_as::<_, (String, String)>("SELECT name, type FROM pragma_table_info('tags')")
-        .fetch_all(pool)
-        .await?;
+    let columns =
+        sqlx::query_as::<_, (String, String)>("SELECT name, type FROM pragma_table_info('tags')")
+            .fetch_all(pool)
+            .await?;
     let has_integer_id = columns
         .iter()
         .any(|(name, column_type)| name == "id" && column_type.eq_ignore_ascii_case("INTEGER"));
@@ -25,11 +26,20 @@ async fn take_legacy_integer_tags(
     }
 
     let has_column = |column: &str| columns.iter().any(|(name, _)| name == column);
-    let kind = if has_column("kind") { "kind" } else { "'content'" };
-    let sort_order = if has_column("sort_order") { "sort_order" } else { "0" };
-    let tags = sqlx::query_as::<_, LegacyTag>(&format!("SELECT id, name, {kind}, {sort_order} FROM tags"))
-        .fetch_all(pool)
-        .await?;
+    let kind = if has_column("kind") {
+        "kind"
+    } else {
+        "'content'"
+    };
+    let sort_order = if has_column("sort_order") {
+        "sort_order"
+    } else {
+        "0"
+    };
+    let tags =
+        sqlx::query_as::<_, LegacyTag>(&format!("SELECT id, name, {kind}, {sort_order} FROM tags"))
+            .fetch_all(pool)
+            .await?;
 
     let has_links = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'recipe_tags'",
@@ -45,7 +55,9 @@ async fn take_legacy_integer_tags(
         Vec::new()
     };
 
-    sqlx::query("DROP TABLE IF EXISTS recipe_tags").execute(pool).await?;
+    sqlx::query("DROP TABLE IF EXISTS recipe_tags")
+        .execute(pool)
+        .await?;
     sqlx::query("DROP TABLE tags").execute(pool).await?;
 
     Ok(Some((tags, links)))
@@ -121,8 +133,8 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 )
                 .bind(new_id)
                 .bind(recipe_id)
-                    .execute(pool)
-                    .await?;
+                .execute(pool)
+                .await?;
             }
         }
     }
@@ -259,7 +271,11 @@ pub async fn list_tags(pool: &SqlitePool) -> Result<Vec<Tag>, sqlx::Error> {
 }
 
 /// Creates a tag; new tags are appended after existing tags of the same kind.
-pub async fn create_tag(pool: &SqlitePool, name: &str, kind: TagKind) -> Result<String, sqlx::Error> {
+pub async fn create_tag(
+    pool: &SqlitePool,
+    name: &str,
+    kind: TagKind,
+) -> Result<String, sqlx::Error> {
     let sort_order = sqlx::query_scalar::<_, i64>(
         "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM tags WHERE kind = ?",
     )
@@ -331,7 +347,11 @@ pub async fn set_tag_order(pool: &SqlitePool, tag_ids: &[String]) -> Result<(), 
 }
 
 /// Replaces all tags of a recipe with the given tags.
-pub async fn set_recipe_tags(pool: &SqlitePool, recipe_id: &str, tag_ids: &[String]) -> Result<(), sqlx::Error> {
+pub async fn set_recipe_tags(
+    pool: &SqlitePool,
+    recipe_id: &str,
+    tag_ids: &[String],
+) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM recipe_tags WHERE recipe_id = ?")
         .bind(recipe_id)
         .execute(pool)
@@ -355,7 +375,16 @@ pub async fn insert_recipe(
     cook_time_minutes: Option<i64>,
 ) -> Result<String, sqlx::Error> {
     let recipe_id = uuid::Uuid::new_v4().to_string();
-    insert_recipe_with_id(pool, &recipe_id, name, description, servings, prep_time_minutes, cook_time_minutes).await?;
+    insert_recipe_with_id(
+        pool,
+        &recipe_id,
+        name,
+        description,
+        servings,
+        prep_time_minutes,
+        cook_time_minutes,
+    )
+    .await?;
     Ok(recipe_id)
 }
 
@@ -675,7 +704,10 @@ pub async fn list_recipe_summaries(pool: &SqlitePool) -> Result<Vec<Recipe>, sql
     list_recipes(pool).await
 }
 
-pub async fn load_recipe_detail(pool: &SqlitePool, recipe_id: &str) -> Result<RecipeDetail, sqlx::Error> {
+pub async fn load_recipe_detail(
+    pool: &SqlitePool,
+    recipe_id: &str,
+) -> Result<RecipeDetail, sqlx::Error> {
     let recipe = sqlx::query_as::<_, Recipe>(
         r#"
         SELECT id, name, description, servings, prep_time_minutes, cook_time_minutes, created_at, updated_at
@@ -691,7 +723,12 @@ pub async fn load_recipe_detail(pool: &SqlitePool, recipe_id: &str) -> Result<Re
     let steps = list_steps_for_recipe(pool, recipe_id).await?;
     let tags = list_tags_for_recipe(pool, recipe_id).await?;
 
-    Ok(RecipeDetail { recipe, ingredients, steps, tags })
+    Ok(RecipeDetail {
+        recipe,
+        ingredients,
+        steps,
+        tags,
+    })
 }
 
 #[cfg(test)]
@@ -766,21 +803,17 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO tags (id, name) VALUES ('t1', 'breakfast'), ('t2', 'quick');",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO tags (id, name) VALUES ('t1', 'breakfast'), ('t2', 'quick');")
+            .execute(&pool)
+            .await
+            .unwrap();
 
-        sqlx::query(
-            "INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, 't1'), (?, 't2');",
-        )
-        .bind(&recipe_id)
-        .bind(&recipe_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO recipe_tags (recipe_id, tag_id) VALUES (?, 't1'), (?, 't2');")
+            .bind(&recipe_id)
+            .bind(&recipe_id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         sqlx::query(
             "INSERT INTO ingredients (recipe_id, group_name, quantity, unit, ingredient_name, optional, sort_order) VALUES (?, 'Base', '2', 'cups', 'flour', 0, 1), (?, 'Base', '1', 'cup', 'milk', 0, 2);",
@@ -800,7 +833,9 @@ mod tests {
         .await
         .unwrap();
 
-        let ingredients = list_ingredients_for_recipe(&pool, &recipe_id).await.unwrap();
+        let ingredients = list_ingredients_for_recipe(&pool, &recipe_id)
+            .await
+            .unwrap();
         let steps = list_steps_for_recipe(&pool, &recipe_id).await.unwrap();
         let tags = list_tags_for_recipe(&pool, &recipe_id).await.unwrap();
 
@@ -874,10 +909,12 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("CREATE TABLE recipe_tags (recipe_id TEXT NOT NULL, tag_id INTEGER NOT NULL)")
             .execute(&pool)
             .await
@@ -906,8 +943,12 @@ mod tests {
         let pool = connect_db("sqlite::memory:").await.unwrap();
         init_db(&pool).await.unwrap();
 
-        upsert_tag(&pool, "t1", "Soups", TagKind::Chapter, 3).await.unwrap();
-        upsert_tag(&pool, "t1", "Stews", TagKind::Content, 1).await.unwrap();
+        upsert_tag(&pool, "t1", "Soups", TagKind::Chapter, 3)
+            .await
+            .unwrap();
+        upsert_tag(&pool, "t1", "Stews", TagKind::Content, 1)
+            .await
+            .unwrap();
 
         let tags = list_tags(&pool).await.unwrap();
         assert_eq!(tags.len(), 1);
@@ -922,8 +963,12 @@ mod tests {
         init_db(&pool).await.unwrap();
 
         create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
-        create_tag(&pool, " Soups ", TagKind::Chapter).await.unwrap();
-        create_tag(&pool, "Desserts", TagKind::Chapter).await.unwrap();
+        create_tag(&pool, " Soups ", TagKind::Chapter)
+            .await
+            .unwrap();
+        create_tag(&pool, "Desserts", TagKind::Chapter)
+            .await
+            .unwrap();
 
         let tags = list_tags(&pool).await.unwrap();
         let names = tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>();
@@ -950,7 +995,9 @@ mod tests {
         init_db(&pool).await.unwrap();
 
         let soups = create_tag(&pool, "Soups", TagKind::Chapter).await.unwrap();
-        let desserts = create_tag(&pool, "Desserts", TagKind::Chapter).await.unwrap();
+        let desserts = create_tag(&pool, "Desserts", TagKind::Chapter)
+            .await
+            .unwrap();
         set_tag_order(&pool, &[desserts, soups]).await.unwrap();
 
         let names = list_tags(&pool)
@@ -978,13 +1025,21 @@ mod tests {
         let pool = connect_db("sqlite::memory:").await.unwrap();
         init_db(&pool).await.unwrap();
 
-        let recipe_id = insert_recipe(&pool, "Porridge", None, None, None, None).await.unwrap();
-        let breakfast = create_tag(&pool, "breakfast", TagKind::Content).await.unwrap();
+        let recipe_id = insert_recipe(&pool, "Porridge", None, None, None, None)
+            .await
+            .unwrap();
+        let breakfast = create_tag(&pool, "breakfast", TagKind::Content)
+            .await
+            .unwrap();
         let vegan = create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
         let mains = create_tag(&pool, "Mains", TagKind::Chapter).await.unwrap();
 
-        set_recipe_tags(&pool, &recipe_id, &[breakfast, mains.clone()]).await.unwrap();
-        set_recipe_tags(&pool, &recipe_id, &[vegan.clone(), mains.clone()]).await.unwrap();
+        set_recipe_tags(&pool, &recipe_id, &[breakfast, mains.clone()])
+            .await
+            .unwrap();
+        set_recipe_tags(&pool, &recipe_id, &[vegan.clone(), mains.clone()])
+            .await
+            .unwrap();
 
         let tags = load_recipe_detail(&pool, &recipe_id).await.unwrap().tags;
         let names = tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>();
