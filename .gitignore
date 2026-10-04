@@ -3,3 +3,12 @@ settings.json
 recipes.db
 *.tex
 *.json
+
+# style templates
+*.sty
+!templates/*.sty
+
+# ignore tex output
+*.aux
+*.log
+*.pdf
