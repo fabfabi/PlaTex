@@ -8,4 +8,10 @@ if [ "$branch" = "main" ] || [ "$branch" = "dev" ]; then
   exit 1
 fi
 
+if ! cargo fmt --all -- --check > /dev/null; then
+  echo "Rust code is not formatted."
+  echo "Run 'cargo fmt' and stage the changes before committing."
+  exit 1
+fi
+
 exit 0

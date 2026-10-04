@@ -1,0 +1,228 @@
+% ------------------------------------------------------------
+% PlaTex template "A5 vertical split" (DIN A5, ingredients left, steps right)
+%
+% Exported next to the .tex as platex.sty. Generated .tex files only contain
+% the macros defined here; every template must define all of them.
+%
+%   \Kapitel{name}                       chapter divider page
+%   \begin{Rezept}{title}{icon} ...      one recipe per page; icon = chapter key
+%   \RezeptInfo{servings}{prep}{cook}    any argument may be empty
+%   \Beschreibung{text}
+%   \begin{Zutaten} ... \end{Zutaten}    left column
+%   \begin{Zutatengruppe}{name}          ingredient table, name may be empty
+%   \Zutat{qty}{name}, \OptionaleZutat{qty}{name}
+%   \begin{Zubereitung} ...              right column
+%   \Schritt{text}, \OptionalerSchritt{text}
+%
+% Chapter symbols
+%   Each recipe shows the symbol of the chapter it is printed in, left of the
+%   recipe title. It is loaded from icon/symbol_<chapter>.png, or .jpg if no
+%   .png exists, relative to the .tex file. <chapter> is the chapter name in
+%   lowercase with umlauts transliterated and everything but letters, digits
+%   and "-" removed:
+%     Pasta    -> icon/symbol_pasta.png   (or .jpg)
+%     Soße     -> icon/symbol_sosse.png   (or .jpg)
+%     Sonstige -> icon/symbol_sonstige.png (or .jpg; recipes without a chapter)
+%   Without such a file no symbol is shown and the title uses the full width.
+% ------------------------------------------------------------
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{platex}
+
+% ------------------------------------------------------------
+% SEITENFORMAT
+% ------------------------------------------------------------
+\RequirePackage[
+    a5paper,
+    top=11mm,
+    bottom=10mm,
+    left=13mm,
+    right=13mm
+]{geometry}
+
+% ------------------------------------------------------------
+% SCHRIFT UND SPRACHE
+% ------------------------------------------------------------
+\RequirePackage[T1]{fontenc}
+\RequirePackage[utf8]{inputenc}
+\RequirePackage[ngerman]{babel}
+\RequirePackage{lmodern}
+
+% Serifenlose Schrift
+\renewcommand{\familydefault}{\sfdefault}
+
+% ------------------------------------------------------------
+% PAKETE
+% ------------------------------------------------------------
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{tabularx}
+\RequirePackage{array}
+
+% ------------------------------------------------------------
+% SEITENSTIL
+% ------------------------------------------------------------
+\pagestyle{empty}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+
+% ------------------------------------------------------------
+% FARBEN
+% ------------------------------------------------------------
+\definecolor{kochgruen}{HTML}{3F6B4F}
+\definecolor{kochgruenlinie}{HTML}{C8D5CC}
+\definecolor{textgrau}{HTML}{333333}
+\definecolor{optionalgrau}{HTML}{888888}
+
+\AtBeginDocument{\color{textgrau}}
+
+% True if the argument is empty
+\newcommand{\PlaTexIfEmpty}[3]{%
+    \if\relax\detokenize{#1}\relax #2\else #3\fi
+}
+
+% ------------------------------------------------------------
+% KAPITEL
+% ------------------------------------------------------------
+\newcommand{\Kapitel}[1]{%
+    \clearpage
+    \vspace*{\fill}
+    \begin{center}
+        {\fontsize{25}{28}\selectfont\bfseries\color{kochgruen}#1}
+    \end{center}
+    \vspace*{\fill}
+    \clearpage
+}
+
+% ------------------------------------------------------------
+% REZEPT
+% ------------------------------------------------------------
+% Recipe title, scaled to the width of the surrounding box
+\newcommand{\PlaTexTitel}[1]{%
+    \resizebox{\linewidth}{!}{%
+        {\fontsize{25}{28}\selectfont
+        \bfseries
+        \color{kochgruen}
+        #1}%
+    }%
+}
+
+% Sets \PlaTexSymbol to icon/symbol_<key>.png or .jpg, or empty if neither exists
+\newcommand{\PlaTexFindeSymbol}[1]{%
+    \IfFileExists{icon/symbol_#1.png}{\def\PlaTexSymbol{icon/symbol_#1.png}}{%
+        \IfFileExists{icon/symbol_#1.jpg}{\def\PlaTexSymbol{icon/symbol_#1.jpg}}{%
+            \def\PlaTexSymbol{}}}%
+}
+
+\newenvironment{Rezept}[2]{%
+    \clearpage
+    \noindent
+    % Chapter symbol left of the title; without a symbol file the title
+    % uses the full width.
+    \PlaTexFindeSymbol{#2}%
+    \expandafter\PlaTexIfEmpty\expandafter{\PlaTexSymbol}{%
+        \PlaTexTitel{#1}%
+    }{%
+        \begin{minipage}[c]{0.10\textwidth}
+            \includegraphics[
+                width=9mm,
+                height=9mm,
+                keepaspectratio
+            ]{\PlaTexSymbol}%
+        \end{minipage}%
+        \hfill
+        \begin{minipage}[c]{0.86\textwidth}
+            \PlaTexTitel{#1}%
+        \end{minipage}%
+    }
+
+    \vspace{3mm}
+
+    % Horizontale Linie
+    \textcolor{kochgruenlinie}{\rule{\textwidth}{0.5pt}}
+
+    \vspace{4mm}
+}{%
+    \clearpage
+}
+
+\newcommand{\RezeptInfo}[3]{%
+    {\small
+    \PlaTexIfEmpty{#1}{}{Portionen: #1\quad}%
+    \PlaTexIfEmpty{#2}{}{Vorbereitung: #2 min\quad}%
+    \PlaTexIfEmpty{#3}{}{Kochzeit: #3 min}%
+    \par}
+    \vspace{2mm}
+}
+
+\newcommand{\Beschreibung}[1]{%
+    {\small\itshape #1\par}
+    \vspace{4mm}
+}
+
+% ------------------------------------------------------------
+% ZUTATEN (linke Spalte)
+% ------------------------------------------------------------
+\newenvironment{Zutaten}{%
+    \noindent
+    \begin{minipage}[t]{0.38\textwidth}
+    \vspace{0pt}
+    \itshape
+}{%
+    \end{minipage}%
+    \hfill
+}
+
+\newenvironment{Zutatengruppe}[1]{%
+    \PlaTexIfEmpty{#1}{}{%
+        {\upshape\small\bfseries\color{kochgruen}#1\par}
+        \vspace{1mm}%
+    }%
+    \tabularx{\linewidth}{
+        @{}
+        >{\raggedleft\arraybackslash}p{17mm}
+        @{\hspace{2mm}}
+        >{\raggedright\arraybackslash}X
+        @{}
+    }
+}{%
+    \endtabularx
+    \par
+    \vspace{4mm}
+}
+
+\newcommand{\Zutat}[2]{#1 & #2 \\[0.9mm]}
+\newcommand{\OptionaleZutat}[2]{%
+    {\color{optionalgrau}#1} & {\color{optionalgrau}#2 (optional)} \\[0.9mm]%
+}
+
+% ------------------------------------------------------------
+% ZUBEREITUNG (rechte Spalte)
+% ------------------------------------------------------------
+\newenvironment{Zubereitung}{%
+    \begin{minipage}[t]{0.58\textwidth}
+    \vspace{0pt}
+    \begin{enumerate}
+        \setlength{\itemsep}{1.7mm}
+        \setlength{\parskip}{0pt}
+        \setlength{\parsep}{0pt}
+        \setlength{\topsep}{0pt}
+        \setlength{\partopsep}{0pt}
+        \setlength{\leftmargin}{0pt}
+        \setlength{\labelwidth}{6mm}
+        \setlength{\labelsep}{1mm}
+        \setlength{\itemindent}{0pt}
+        \setlength{\listparindent}{0pt}
+
+        \renewcommand{\labelenumi}{%
+            \color{kochgruen}\bfseries\theenumi.%
+        }
+}{%
+    \end{enumerate}
+    \end{minipage}
+}
+
+\newcommand{\Schritt}[1]{\item #1}
+\newcommand{\OptionalerSchritt}[1]{\item {\color{optionalgrau}(optional) #1}}
+
+\endinput

@@ -35,8 +35,13 @@
 
 ## Validation and testing
 
+- Run `cargo fmt` after changing Rust code; commits are rejected if `cargo fmt --check` fails.
 - Run the smallest relevant validation command for each change.
 - Do not claim work is complete without validation evidence.
 - For business logic changes, add or update tests before or alongside the fix.
+- Write unit tests for data validation, SQL mapping, and export logic.
+- Prefer real behavior tests over mock-heavy tests.
 - Avoid mock-heavy tests when real behavior can be tested directly.
+- Keep tests small, clear, and focused on one behavior.
+- Use unit tests to cover CRUD logic, schema assumptions, and LaTeX rendering rules.
 - Update documentation when behavior or structure changes.
