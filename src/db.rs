@@ -190,12 +190,18 @@ pub async fn list_recipes(pool: &SqlitePool) -> Result<Vec<Recipe>, sqlx::Error>
     Ok(recipes)
 }
 
-pub async fn clear_all_recipes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM recipe_tags").execute(pool).await?;
-    sqlx::query("DELETE FROM ingredients").execute(pool).await?;
-    sqlx::query("DELETE FROM steps").execute(pool).await?;
-    sqlx::query("DELETE FROM tags").execute(pool).await?;
-    sqlx::query("DELETE FROM recipes").execute(pool).await?;
+/// Deletes a recipe together with its ingredients, steps and tag links.
+pub async fn delete_recipe(pool: &SqlitePool, recipe_id: &str) -> Result<(), sqlx::Error> {
+    for table in ["recipe_tags", "ingredients", "steps"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE recipe_id = ?"))
+            .bind(recipe_id)
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("DELETE FROM recipes WHERE id = ?")
+        .bind(recipe_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1007,6 +1013,40 @@ mod tests {
             .map(|tag| tag.name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["Desserts", "Soups"]);
+    }
+
+    #[tokio::test]
+    async fn delete_recipe_removes_only_that_recipe_and_its_details() {
+        let pool = connect_db("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let porridge = insert_recipe(&pool, "Porridge", None, None, None, None)
+            .await
+            .unwrap();
+        let toast = insert_recipe(&pool, "Toast", None, None, None, None)
+            .await
+            .unwrap();
+        let breakfast = create_tag(&pool, "breakfast", TagKind::Content)
+            .await
+            .unwrap();
+        set_recipe_tags(&pool, &porridge, &[breakfast.clone()])
+            .await
+            .unwrap();
+        set_recipe_tags(&pool, &toast, &[breakfast.clone()])
+            .await
+            .unwrap();
+
+        delete_recipe(&pool, &porridge).await.unwrap();
+
+        let recipes = list_recipes(&pool).await.unwrap();
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].id, toast);
+        assert!(list_tags_for_recipe(&pool, &porridge)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(list_tags_for_recipe(&pool, &toast).await.unwrap().len(), 1);
+        assert_eq!(list_tags(&pool).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

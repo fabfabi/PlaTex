@@ -52,6 +52,24 @@ enum TagAction {
     MoveChapter(usize, i32),
 }
 
+/// A deletion waiting for the user to confirm it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingDelete {
+    Recipe { id: String, name: String },
+    Tag { id: String, name: String },
+}
+
+impl PendingDelete {
+    fn prompt(&self) -> String {
+        match self {
+            PendingDelete::Recipe { name, .. } => format!("Delete recipe \"{name}\"?"),
+            PendingDelete::Tag { name, .. } => {
+                format!("Delete tag \"{name}\"? It will be removed from all recipes.")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RecipeSummary {
     id: String,
@@ -302,6 +320,7 @@ pub struct App {
     show_latex_export: bool,
     template_choice: TemplateChoice,
     uploaded_template: Option<UploadedTemplate>,
+    pending_delete: Option<PendingDelete>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +351,7 @@ impl App {
             show_latex_export: false,
             template_choice: TemplateChoice::BuiltIn(0),
             uploaded_template: None,
+            pending_delete: None,
         };
         app.refresh_tags();
 
@@ -599,6 +619,53 @@ impl App {
         }
     }
 
+    fn delete_recipe(&mut self, recipe_id: &str, name: &str) {
+        let pool = self.pool.clone();
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { crate::db::delete_recipe(&pool, recipe_id).await });
+
+        match result {
+            Ok(()) => {
+                if self.selected_recipe_id.as_deref() == Some(recipe_id) {
+                    self.reset_recipe();
+                }
+                self.status = format!("Deleted recipe: {name}");
+            }
+            Err(error) => self.status = format!("Delete recipe failed: {error}"),
+        }
+        self.refresh_recipe_list();
+    }
+
+    fn show_delete_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_delete.clone() else {
+            return;
+        };
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new("Confirm deletion")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(pending.prompt());
+                ui.horizontal(|ui| {
+                    confirmed = ui.button("Delete").clicked();
+                    cancelled = ui.button("Cancel").clicked();
+                });
+            });
+
+        if confirmed {
+            self.pending_delete = None;
+            match pending {
+                PendingDelete::Recipe { id, name } => self.delete_recipe(&id, &name),
+                PendingDelete::Tag { id, .. } => self.apply_tag_action(TagAction::Delete(id)),
+            }
+        } else if cancelled {
+            self.pending_delete = None;
+        }
+    }
+
     fn show_latex_export_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_latex_export;
         let mut export = false;
@@ -863,6 +930,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.show_latex_export_window(ctx);
+        self.show_delete_confirmation(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
@@ -876,6 +944,21 @@ impl eframe::App for App {
                         if ui.button("New recipe").clicked() {
                             self.reset_recipe();
                             self.status = "New recipe".to_string();
+                        }
+
+                        if let Some(recipe_id) = self.selected_recipe_id.clone() {
+                            if ui.button("Delete recipe").clicked() {
+                                let name = self
+                                    .recipes
+                                    .iter()
+                                    .find(|recipe| recipe.id == recipe_id)
+                                    .map(|recipe| recipe.name.clone())
+                                    .unwrap_or_else(|| self.recipe.name.clone());
+                                self.pending_delete = Some(PendingDelete::Recipe {
+                                    id: recipe_id,
+                                    name,
+                                });
+                            }
                         }
 
                         if ui.button("Save recipe").clicked() {
@@ -1027,6 +1110,7 @@ impl eframe::App for App {
                             }
 
                             let mut actions = Vec::new();
+                            let mut pending_delete = None;
                             for (kind, heading) in [
                                 (TagKind::Chapter, "Chapters (in order)"),
                                 (TagKind::Content, "Content tags"),
@@ -1060,8 +1144,10 @@ impl eframe::App for App {
                                                 }
                                             }
                                             if ui.button("Delete").clicked() {
-                                                actions
-                                                    .push(TagAction::Delete(entry.tag.id.clone()));
+                                                pending_delete = Some(PendingDelete::Tag {
+                                                    id: entry.tag.id.clone(),
+                                                    name: entry.tag.name.clone(),
+                                                });
                                             }
                                         });
                                     });
@@ -1072,6 +1158,9 @@ impl eframe::App for App {
                             }
                             for action in actions {
                                 self.apply_tag_action(action);
+                            }
+                            if pending_delete.is_some() {
+                                self.pending_delete = pending_delete;
                             }
                         });
 
@@ -1331,6 +1420,9 @@ impl eframe::App for App {
                         .id_salt("recipes_scroll")
                         .max_height(180.0)
                         .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
                         .show(ui, |ui| {
                             if self.recipes.is_empty() {
                                 ui.label("No recipes yet.");

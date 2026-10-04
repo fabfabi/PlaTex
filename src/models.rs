@@ -61,9 +61,3 @@ pub struct RecipeDetail {
     pub steps: Vec<Step>,
     pub tags: Vec<Tag>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct RecipeTag {
-    pub recipe_id: String,
-    pub tag_id: String,
-}
