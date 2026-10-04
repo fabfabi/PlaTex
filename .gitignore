@@ -13,3 +13,6 @@ recipes.db
 *.aux
 *.log
 *.pdf
+
+# Rezepte
+!rezepte/rezepte_import.json
