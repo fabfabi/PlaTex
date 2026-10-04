@@ -1522,8 +1522,7 @@ mod tests {
     }
 
     async fn test_pool() -> sqlx::SqlitePool {
-        let pool = crate::db::connect_db("sqlite::memory:").await.unwrap();
-        crate::db::init_db(&pool).await.unwrap();
+        let pool = crate::db::open_test_db().await;
         pool
     }
 

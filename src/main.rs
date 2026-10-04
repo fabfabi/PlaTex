@@ -17,15 +17,10 @@ fn main() -> eframe::Result<()> {
         });
     let db_path = exe_dir.join("recipes.db");
 
-    let pool = runtime.block_on(async {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true);
-        let pool = sqlx::SqlitePool::connect_with(options).await?;
-        db::init_db(&pool).await?;
-
-        Ok::<_, sqlx::Error>(pool)
-    });
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = runtime.block_on(db::open_db(options));
 
     let pool = match pool {
         Ok(pool) => pool,

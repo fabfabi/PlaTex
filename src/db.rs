@@ -1,9 +1,20 @@
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::SqlitePool;
 
 use crate::models::{Ingredient, Recipe, RecipeDetail, Step, Tag, TagKind};
 
-pub async fn connect_db(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
-    SqlitePool::connect(database_url).await
+/// Connects to the database and makes sure the schema is up to date.
+pub async fn open_db(options: SqliteConnectOptions) -> Result<SqlitePool, sqlx::Error> {
+    let pool = SqlitePool::connect_with(options).await?;
+    init_db(&pool).await?;
+    Ok(pool)
+}
+
+/// Opens a fresh, initialized in-memory database for tests.
+#[cfg(test)]
+pub async fn open_test_db() -> SqlitePool {
+    let options = "sqlite::memory:".parse::<SqliteConnectOptions>().unwrap();
+    open_db(options).await.unwrap()
 }
 
 type LegacyTag = (i64, String, String, i64);
@@ -743,8 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_db_creates_required_tables() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let tables = sqlx::query_scalar::<_, String>(
             r#"
@@ -769,8 +779,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_recipe_and_list_recipes_works() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let recipe_id = insert_recipe(
             &pool,
@@ -795,8 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn recipe_related_data_can_be_fetched() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let recipe_id = insert_recipe(
             &pool,
@@ -855,8 +863,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_recipe_and_load_detail_round_trip() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let recipe_id = save_recipe_with_details(
             &pool,
@@ -906,7 +913,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_db_migrates_integer_tag_ids_to_uuids() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query("CREATE TABLE recipes (id TEXT PRIMARY KEY)")
             .execute(&pool)
             .await
@@ -946,8 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_tag_inserts_then_overwrites() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         upsert_tag(&pool, "t1", "Soups", TagKind::Chapter, 3)
             .await
@@ -965,8 +971,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_tag_appends_per_kind_and_lists_chapters_first() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
         create_tag(&pool, " Soups ", TagKind::Chapter)
@@ -985,8 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_tag_names_are_allowed() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let first = create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
         let second = create_tag(&pool, "vegan", TagKind::Content).await.unwrap();
@@ -997,8 +1001,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_tag_order_reorders_chapters() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let soups = create_tag(&pool, "Soups", TagKind::Chapter).await.unwrap();
         let desserts = create_tag(&pool, "Desserts", TagKind::Chapter)
@@ -1017,8 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_recipe_removes_only_that_recipe_and_its_details() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let porridge = insert_recipe(&pool, "Porridge", None, None, None, None)
             .await
@@ -1051,8 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_tag_updates_name() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let tag_id = create_tag(&pool, "vegn", TagKind::Content).await.unwrap();
         rename_tag(&pool, &tag_id, "vegan").await.unwrap();
@@ -1062,8 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_recipe_tags_replaces_tags_and_delete_tag_unlinks() {
-        let pool = connect_db("sqlite::memory:").await.unwrap();
-        init_db(&pool).await.unwrap();
+        let pool = open_test_db().await;
 
         let recipe_id = insert_recipe(&pool, "Porridge", None, None, None, None)
             .await
