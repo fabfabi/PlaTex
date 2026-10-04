@@ -1213,203 +1213,228 @@ impl eframe::App for App {
                     }
 
                     ui.separator();
-                    ui.heading("Ingredients");
-                    egui::ScrollArea::vertical()
-                        .id_salt("ingredients_scroll")
-                        .max_height(220.0)
-                        .auto_shrink([false, false])
+                    egui::CollapsingHeader::new(egui::RichText::new("Ingredients").heading())
+                        .id_salt("ingredients_section")
                         .show(ui, |ui| {
-                            let mut group_indexes_to_remove = Vec::new();
-                            for group_index in 0..self.recipe.groups.len() {
-                                let group_count = self.recipe.groups.len();
-                                let mut move_group_up = false;
-                                let mut move_group_down = false;
-                                let mut add_ingredient = false;
-                                let mut remove_group = false;
-
-                                ui.push_id(
-                                    ("ingredient_group", self.recipe.groups[group_index].id),
-                                    |ui| {
-                                        ui.horizontal(|ui| {
-                                            let group = &mut self.recipe.groups[group_index];
-                                            ui.label("Group");
-                                            ui.add(
-                                                egui::TextEdit::singleline(&mut group.name)
-                                                    .desired_width(180.0),
-                                            );
-                                            move_group_up =
-                                                ui.button("up").clicked() && group_index > 0;
-                                            move_group_down = ui.button("down").clicked()
-                                                && group_index + 1 < group_count;
-                                            add_ingredient = ui.button("Add ingredient").clicked();
-                                            remove_group = ui.button("Remove group").clicked()
-                                                && group_count > 1;
-                                        });
-                                    },
-                                );
-
-                                if move_group_up {
-                                    self.move_group(group_index, -1);
-                                }
-                                if move_group_down {
-                                    self.move_group(group_index, 1);
-                                }
-                                if add_ingredient {
-                                    self.add_ingredient(group_index);
-                                }
-                                if remove_group {
-                                    group_indexes_to_remove.push(group_index);
-                                }
-
-                                let mut ingredient_indexes_to_remove = Vec::new();
-                                let mut ingredient_move_actions = Vec::new();
-
-                                ui.vertical(|ui| {
-                                    let ingredient_count =
-                                        self.recipe.groups[group_index].ingredients.len();
-                                    for ingredient_index in 0..ingredient_count {
-                                        let mut move_ingredient_up = false;
-                                        let mut move_ingredient_down = false;
-                                        let mut remove_ingredient = false;
+                            egui::ScrollArea::vertical()
+                                .id_salt("ingredients_scroll")
+                                .max_height(220.0)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    let mut group_indexes_to_remove = Vec::new();
+                                    for group_index in 0..self.recipe.groups.len() {
+                                        let group_count = self.recipe.groups.len();
+                                        let mut move_group_up = false;
+                                        let mut move_group_down = false;
+                                        let mut add_ingredient = false;
+                                        let mut remove_group = false;
 
                                         ui.push_id(
                                             (
-                                                "ingredient",
+                                                "ingredient_group",
                                                 self.recipe.groups[group_index].id,
-                                                self.recipe.groups[group_index].ingredients
-                                                    [ingredient_index]
-                                                    .id,
                                             ),
                                             |ui| {
                                                 ui.horizontal(|ui| {
-                                                    let ingredient = &mut self.recipe.groups
-                                                        [group_index]
-                                                        .ingredients[ingredient_index];
+                                                    let group =
+                                                        &mut self.recipe.groups[group_index];
+                                                    ui.label("Group");
                                                     ui.add(
-                                                        egui::TextEdit::singleline(
-                                                            &mut ingredient.quantity_unit,
-                                                        )
-                                                        .desired_width(150.0),
+                                                        egui::TextEdit::singleline(&mut group.name)
+                                                            .desired_width(180.0),
                                                     );
-                                                    ui.add(
-                                                        egui::TextEdit::singleline(
-                                                            &mut ingredient.description,
-                                                        )
-                                                        .desired_width(240.0),
-                                                    );
-                                                    ui.checkbox(
-                                                        &mut ingredient.optional,
-                                                        "Optional",
-                                                    );
-                                                    move_ingredient_up = ui.button("up").clicked()
-                                                        && ingredient_index > 0;
-                                                    move_ingredient_down = ui
-                                                        .button("down")
-                                                        .clicked()
-                                                        && ingredient_index + 1 < ingredient_count;
-                                                    remove_ingredient =
-                                                        ui.button("Remove").clicked()
-                                                            && ingredient_count > 1;
+                                                    move_group_up = ui.button("up").clicked()
+                                                        && group_index > 0;
+                                                    move_group_down = ui.button("down").clicked()
+                                                        && group_index + 1 < group_count;
+                                                    add_ingredient =
+                                                        ui.button("Add ingredient").clicked();
+                                                    remove_group =
+                                                        ui.button("Remove group").clicked()
+                                                            && group_count > 1;
                                                 });
                                             },
                                         );
 
-                                        if move_ingredient_up {
-                                            ingredient_move_actions.push((ingredient_index, -1));
+                                        if move_group_up {
+                                            self.move_group(group_index, -1);
                                         }
-                                        if move_ingredient_down {
-                                            ingredient_move_actions.push((ingredient_index, 1));
+                                        if move_group_down {
+                                            self.move_group(group_index, 1);
                                         }
-                                        if remove_ingredient {
-                                            ingredient_indexes_to_remove.push(ingredient_index);
+                                        if add_ingredient {
+                                            self.add_ingredient(group_index);
                                         }
+                                        if remove_group {
+                                            group_indexes_to_remove.push(group_index);
+                                        }
+
+                                        let mut ingredient_indexes_to_remove = Vec::new();
+                                        let mut ingredient_move_actions = Vec::new();
+
+                                        ui.vertical(|ui| {
+                                            let ingredient_count =
+                                                self.recipe.groups[group_index].ingredients.len();
+                                            for ingredient_index in 0..ingredient_count {
+                                                let mut move_ingredient_up = false;
+                                                let mut move_ingredient_down = false;
+                                                let mut remove_ingredient = false;
+
+                                                ui.push_id(
+                                                    (
+                                                        "ingredient",
+                                                        self.recipe.groups[group_index].id,
+                                                        self.recipe.groups[group_index].ingredients
+                                                            [ingredient_index]
+                                                            .id,
+                                                    ),
+                                                    |ui| {
+                                                        ui.horizontal(|ui| {
+                                                            let ingredient = &mut self
+                                                                .recipe
+                                                                .groups[group_index]
+                                                                .ingredients[ingredient_index];
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(
+                                                                    &mut ingredient.quantity_unit,
+                                                                )
+                                                                .desired_width(150.0),
+                                                            );
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(
+                                                                    &mut ingredient.description,
+                                                                )
+                                                                .desired_width(240.0),
+                                                            );
+                                                            ui.checkbox(
+                                                                &mut ingredient.optional,
+                                                                "Optional",
+                                                            );
+                                                            move_ingredient_up =
+                                                                ui.button("up").clicked()
+                                                                    && ingredient_index > 0;
+                                                            move_ingredient_down =
+                                                                ui.button("down").clicked()
+                                                                    && ingredient_index + 1
+                                                                        < ingredient_count;
+                                                            remove_ingredient =
+                                                                ui.button("Remove").clicked()
+                                                                    && ingredient_count > 1;
+                                                        });
+                                                    },
+                                                );
+
+                                                if move_ingredient_up {
+                                                    ingredient_move_actions
+                                                        .push((ingredient_index, -1));
+                                                }
+                                                if move_ingredient_down {
+                                                    ingredient_move_actions
+                                                        .push((ingredient_index, 1));
+                                                }
+                                                if remove_ingredient {
+                                                    ingredient_indexes_to_remove
+                                                        .push(ingredient_index);
+                                                }
+                                            }
+                                        });
+
+                                        for (ingredient_index, direction) in ingredient_move_actions
+                                        {
+                                            self.move_ingredient(
+                                                group_index,
+                                                ingredient_index,
+                                                direction,
+                                            );
+                                        }
+                                        for ingredient_index in
+                                            ingredient_indexes_to_remove.into_iter().rev()
+                                        {
+                                            if self.recipe.groups[group_index].ingredients.len() > 1
+                                            {
+                                                self.recipe.groups[group_index]
+                                                    .ingredients
+                                                    .remove(ingredient_index);
+                                            }
+                                        }
+                                    }
+
+                                    for group_index in group_indexes_to_remove.into_iter().rev() {
+                                        if self.recipe.groups.len() > 1 {
+                                            self.recipe.groups.remove(group_index);
+                                        }
+                                    }
+
+                                    if ui.button("Add ingredient group").clicked() {
+                                        self.add_group();
                                     }
                                 });
-
-                                for (ingredient_index, direction) in ingredient_move_actions {
-                                    self.move_ingredient(group_index, ingredient_index, direction);
-                                }
-                                for ingredient_index in
-                                    ingredient_indexes_to_remove.into_iter().rev()
-                                {
-                                    if self.recipe.groups[group_index].ingredients.len() > 1 {
-                                        self.recipe.groups[group_index]
-                                            .ingredients
-                                            .remove(ingredient_index);
-                                    }
-                                }
-                            }
-
-                            for group_index in group_indexes_to_remove.into_iter().rev() {
-                                if self.recipe.groups.len() > 1 {
-                                    self.recipe.groups.remove(group_index);
-                                }
-                            }
-
-                            if ui.button("Add ingredient group").clicked() {
-                                self.add_group();
-                            }
                         });
 
                     ui.separator();
-                    ui.heading("Preparation manual");
-                    egui::ScrollArea::vertical()
-                        .id_salt("steps_scroll")
-                        .max_height(220.0)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            let mut step_indexes_to_remove = Vec::new();
-                            for step_index in 0..self.recipe.steps.len() {
-                                let step_count = self.recipe.steps.len();
-                                let mut move_step_up = false;
-                                let mut move_step_down = false;
-                                let mut remove_step = false;
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new("Preparation manual").heading(),
+                    )
+                    .id_salt("steps_section")
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("steps_scroll")
+                            .max_height(220.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let mut step_indexes_to_remove = Vec::new();
+                                for step_index in 0..self.recipe.steps.len() {
+                                    let step_count = self.recipe.steps.len();
+                                    let mut move_step_up = false;
+                                    let mut move_step_down = false;
+                                    let mut remove_step = false;
 
-                                ui.push_id(
-                                    ("preparation_step", self.recipe.steps[step_index].id),
-                                    |ui| {
-                                        ui.horizontal(|ui| {
-                                            let step = &mut self.recipe.steps[step_index];
-                                            ui.label(format!("Step {}", step_index + 1));
-                                            ui.checkbox(&mut step.optional, "Optional");
-                                            move_step_up =
-                                                ui.button("up").clicked() && step_index > 0;
-                                            move_step_down = ui.button("down").clicked()
-                                                && step_index + 1 < step_count;
-                                            remove_step =
-                                                ui.button("Remove").clicked() && step_count > 1;
-                                        });
+                                    ui.push_id(
+                                        ("preparation_step", self.recipe.steps[step_index].id),
+                                        |ui| {
+                                            ui.horizontal(|ui| {
+                                                let step = &mut self.recipe.steps[step_index];
+                                                ui.label(format!("Step {}", step_index + 1));
+                                                ui.checkbox(&mut step.optional, "Optional");
+                                                move_step_up =
+                                                    ui.button("up").clicked() && step_index > 0;
+                                                move_step_down = ui.button("down").clicked()
+                                                    && step_index + 1 < step_count;
+                                                remove_step =
+                                                    ui.button("Remove").clicked() && step_count > 1;
+                                            });
 
-                                        ui.add(
-                                            egui::TextEdit::multiline(
-                                                &mut self.recipe.steps[step_index].instruction,
-                                            )
-                                            .desired_rows(3),
-                                        );
-                                    },
-                                );
+                                            ui.add(
+                                                egui::TextEdit::multiline(
+                                                    &mut self.recipe.steps[step_index].instruction,
+                                                )
+                                                .desired_rows(3),
+                                            );
+                                        },
+                                    );
 
-                                if move_step_up {
-                                    self.move_step(step_index, -1);
+                                    if move_step_up {
+                                        self.move_step(step_index, -1);
+                                    }
+                                    if move_step_down {
+                                        self.move_step(step_index, 1);
+                                    }
+                                    if remove_step {
+                                        step_indexes_to_remove.push(step_index);
+                                    }
                                 }
-                                if move_step_down {
-                                    self.move_step(step_index, 1);
-                                }
-                                if remove_step {
-                                    step_indexes_to_remove.push(step_index);
-                                }
-                            }
 
-                            for step_index in step_indexes_to_remove.into_iter().rev() {
-                                if self.recipe.steps.len() > 1 {
-                                    self.recipe.steps.remove(step_index);
+                                for step_index in step_indexes_to_remove.into_iter().rev() {
+                                    if self.recipe.steps.len() > 1 {
+                                        self.recipe.steps.remove(step_index);
+                                    }
                                 }
-                            }
 
-                            if ui.button("Add preparation step").clicked() {
-                                self.add_step();
-                            }
-                        });
+                                if ui.button("Add preparation step").clicked() {
+                                    self.add_step();
+                                }
+                            });
+                    });
 
                     ui.separator();
                     ui.label(format!("Status: {}", self.status));
