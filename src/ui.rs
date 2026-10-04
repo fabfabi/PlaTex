@@ -70,6 +70,16 @@ impl PendingDelete {
     }
 }
 
+/// An action that would leave the current form; it waits while the recipe has unsaved changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FormAction {
+    NewRecipe,
+    LoadRecipe(String),
+    ExportJson,
+    ExportLatex,
+    ImportJson,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RecipeSummary {
     id: String,
@@ -321,6 +331,9 @@ pub struct App {
     template_choice: TemplateChoice,
     uploaded_template: Option<UploadedTemplate>,
     pending_delete: Option<PendingDelete>,
+    /// The form as it was last loaded, saved or reset; differences mean unsaved changes.
+    saved_recipe: RecipeDraft,
+    pending_action: Option<FormAction>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,6 +365,8 @@ impl App {
             template_choice: TemplateChoice::BuiltIn(0),
             uploaded_template: None,
             pending_delete: None,
+            saved_recipe: RecipeDraft::default(),
+            pending_action: None,
         };
         app.refresh_tags();
 
@@ -369,6 +384,7 @@ impl App {
             ..Default::default()
         });
         app.next_id += 1;
+        app.saved_recipe = app.recipe.clone();
 
         app.recipes = initial_recipes
             .into_iter()
@@ -482,6 +498,7 @@ impl App {
             }
             TagAction::Delete(tag_id) => {
                 self.recipe.tag_ids.remove(&tag_id);
+                self.saved_recipe.tag_ids.remove(&tag_id);
                 runtime.block_on(async { crate::db::delete_tag(&pool, &tag_id).await })
             }
             TagAction::MoveChapter(index, direction) => {
@@ -843,9 +860,112 @@ impl App {
                     });
                 }
 
+                self.saved_recipe = self.recipe.clone();
                 self.status = format!("Loaded: {}", self.recipe.name);
             }
             Err(error) => self.status = format!("Load failed: {error}"),
+        }
+    }
+
+    /// Validates and stores the form. Returns whether the recipe was saved.
+    fn save_recipe(&mut self) -> bool {
+        let name = self.recipe.name.trim();
+        if name.is_empty() {
+            self.status = "Recipe name is required.".to_string();
+            return false;
+        }
+
+        let has_valid_ingredient = self.recipe.groups.iter().any(|group| {
+            group.ingredients.iter().any(|ingredient| {
+                !ingredient.description.trim().is_empty()
+                    || !ingredient.quantity_unit.trim().is_empty()
+            })
+        });
+
+        if !has_valid_ingredient {
+            self.status = "Add at least one ingredient.".to_string();
+            return false;
+        }
+
+        let has_step = self
+            .recipe
+            .steps
+            .iter()
+            .any(|step| !step.instruction.trim().is_empty());
+
+        if !has_step {
+            self.status = "Add at least one preparation step.".to_string();
+            return false;
+        }
+
+        let groups = self
+            .recipe
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group.ingredients.iter().filter_map(|ingredient| {
+                    if ingredient.description.trim().is_empty()
+                        && ingredient.quantity_unit.trim().is_empty()
+                    {
+                        None
+                    } else {
+                        Some(crate::db::IngredientGroupInput {
+                            group_name: Some(group.name.trim().to_string()),
+                            quantity_unit: ingredient.quantity_unit.trim().to_string(),
+                            description: ingredient.description.trim().to_string(),
+                            optional: ingredient.optional,
+                        })
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let steps = self
+            .recipe
+            .steps
+            .iter()
+            .filter(|step| !step.instruction.trim().is_empty())
+            .map(|step| crate::db::StepInput {
+                instruction: step.instruction.trim().to_string(),
+                optional: step.optional,
+            })
+            .collect::<Vec<_>>();
+
+        let saved_name = name.to_string();
+        let tag_ids = self.recipe.tag_ids.iter().cloned().collect::<Vec<_>>();
+        let saved_id = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let id = crate::db::upsert_recipe_with_details(
+                &self.pool,
+                self.selected_recipe_id.as_deref(),
+                name,
+                if self.recipe.description.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.recipe.description.trim())
+                },
+                self.recipe.servings.trim().parse::<i64>().ok(),
+                self.recipe.prep_minutes.trim().parse::<i64>().ok(),
+                self.recipe.cook_minutes.trim().parse::<i64>().ok(),
+                &groups,
+                &steps,
+            )
+            .await?;
+            crate::db::set_recipe_tags(&self.pool, &id, &tag_ids).await?;
+            Ok::<_, sqlx::Error>(id)
+        });
+
+        match saved_id {
+            Ok(id) => {
+                self.selected_recipe_id = Some(id);
+                self.saved_recipe = self.recipe.clone();
+                self.refresh_recipe_list();
+                self.status = format!("Saved: {}", saved_name);
+                true
+            }
+            Err(error) => {
+                self.status = format!("Save failed: {error}");
+                false
+            }
         }
     }
 
@@ -869,6 +989,77 @@ impl App {
             }],
             ..Default::default()
         };
+        self.saved_recipe = self.recipe.clone();
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.recipe != self.saved_recipe
+    }
+
+    /// Runs the action now, or holds it until the user saves or discards unsaved changes.
+    fn request(&mut self, action: FormAction) {
+        if self.has_unsaved_changes() {
+            self.pending_action = Some(action);
+        } else {
+            self.perform(action);
+        }
+    }
+
+    fn perform(&mut self, action: FormAction) {
+        match action {
+            FormAction::NewRecipe => {
+                self.reset_recipe();
+                self.status = "New recipe".to_string();
+            }
+            FormAction::LoadRecipe(recipe_id) => self.load_recipe_into_form(recipe_id),
+            FormAction::ExportJson => self.export_json_file(),
+            FormAction::ExportLatex => self.show_latex_export = true,
+            FormAction::ImportJson => self.import_json_file(),
+        }
+    }
+
+    fn save_pending_action(&mut self) {
+        if let Some(action) = self.pending_action.take() {
+            if self.save_recipe() {
+                self.perform(action);
+            }
+        }
+    }
+
+    fn discard_pending_action(&mut self) {
+        if let Some(action) = self.pending_action.take() {
+            self.recipe = self.saved_recipe.clone();
+            self.perform(action);
+        }
+    }
+
+    fn show_unsaved_changes_dialog(&mut self, ctx: &egui::Context) {
+        if self.pending_action.is_none() {
+            return;
+        }
+        let mut save = false;
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Window::new("Recipe is not saved")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Save your changes before continuing?");
+                ui.horizontal(|ui| {
+                    save = ui.button("Save").clicked();
+                    discard = ui.button("Discard").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+
+        if save {
+            self.save_pending_action();
+        } else if discard {
+            self.discard_pending_action();
+        } else if cancel {
+            self.pending_action = None;
+        }
     }
 
     fn add_group(&mut self) {
@@ -931,6 +1122,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.show_latex_export_window(ctx);
         self.show_delete_confirmation(ctx);
+        self.show_unsaved_changes_dialog(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
@@ -942,8 +1134,7 @@ impl eframe::App for App {
 
                     ui.horizontal(|ui| {
                         if ui.button("New recipe").clicked() {
-                            self.reset_recipe();
-                            self.status = "New recipe".to_string();
+                            self.request(FormAction::NewRecipe);
                         }
 
                         if let Some(recipe_id) = self.selected_recipe_id.clone() {
@@ -962,114 +1153,15 @@ impl eframe::App for App {
                         }
 
                         if ui.button("Save recipe").clicked() {
-                            let name = self.recipe.name.trim();
-                            if name.is_empty() {
-                                self.status = "Recipe name is required.".to_string();
-                                return;
-                            }
-
-                            let has_valid_ingredient = self.recipe.groups.iter().any(|group| {
-                                group.ingredients.iter().any(|ingredient| {
-                                    !ingredient.description.trim().is_empty()
-                                        || !ingredient.quantity_unit.trim().is_empty()
-                                })
-                            });
-
-                            if !has_valid_ingredient {
-                                self.status = "Add at least one ingredient.".to_string();
-                                return;
-                            }
-
-                            let has_step = self
-                                .recipe
-                                .steps
-                                .iter()
-                                .any(|step| !step.instruction.trim().is_empty());
-
-                            if !has_step {
-                                self.status = "Add at least one preparation step.".to_string();
-                                return;
-                            }
-
-                            let groups = self
-                                .recipe
-                                .groups
-                                .iter()
-                                .flat_map(|group| {
-                                    group.ingredients.iter().filter_map(|ingredient| {
-                                        if ingredient.description.trim().is_empty()
-                                            && ingredient.quantity_unit.trim().is_empty()
-                                        {
-                                            None
-                                        } else {
-                                            Some(crate::db::IngredientGroupInput {
-                                                group_name: Some(group.name.trim().to_string()),
-                                                quantity_unit: ingredient
-                                                    .quantity_unit
-                                                    .trim()
-                                                    .to_string(),
-                                                description: ingredient
-                                                    .description
-                                                    .trim()
-                                                    .to_string(),
-                                                optional: ingredient.optional,
-                                            })
-                                        }
-                                    })
-                                })
-                                .collect::<Vec<_>>();
-
-                            let steps = self
-                                .recipe
-                                .steps
-                                .iter()
-                                .filter(|step| !step.instruction.trim().is_empty())
-                                .map(|step| crate::db::StepInput {
-                                    instruction: step.instruction.trim().to_string(),
-                                    optional: step.optional,
-                                })
-                                .collect::<Vec<_>>();
-
-                            let saved_name = name.to_string();
-                            let tag_ids = self.recipe.tag_ids.iter().cloned().collect::<Vec<_>>();
-                            let saved_id =
-                                tokio::runtime::Runtime::new().unwrap().block_on(async {
-                                    let id = crate::db::upsert_recipe_with_details(
-                                        &self.pool,
-                                        self.selected_recipe_id.as_deref(),
-                                        name,
-                                        if self.recipe.description.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(self.recipe.description.trim())
-                                        },
-                                        self.recipe.servings.trim().parse::<i64>().ok(),
-                                        self.recipe.prep_minutes.trim().parse::<i64>().ok(),
-                                        self.recipe.cook_minutes.trim().parse::<i64>().ok(),
-                                        &groups,
-                                        &steps,
-                                    )
-                                    .await?;
-                                    crate::db::set_recipe_tags(&self.pool, &id, &tag_ids).await?;
-                                    Ok::<_, sqlx::Error>(id)
-                                });
-
-                            match saved_id {
-                                Ok(id) => {
-                                    self.selected_recipe_id = Some(id.clone());
-                                    self.refresh_recipe_list();
-                                    self.status = format!("Saved: {}", saved_name);
-                                }
-                                Err(error) => self.status = format!("Save failed: {error}"),
-                            }
+                            self.save_recipe();
                         }
 
                         if ui.button("Export JSON").clicked() {
-                            self.export_json_file();
+                            self.request(FormAction::ExportJson);
                         }
 
                         if ui.button("Export LaTeX...").clicked() {
-                            self.show_latex_export = true;
+                            self.request(FormAction::ExportLatex);
                         }
                     });
 
@@ -1086,7 +1178,7 @@ impl eframe::App for App {
                             "Overwrite changes",
                         );
                         if ui.button("Import JSON").clicked() {
-                            self.import_json_file();
+                            self.request(FormAction::ImportJson);
                         }
                     });
 
@@ -1461,7 +1553,9 @@ impl eframe::App for App {
                                         |ui| {
                                             ui.horizontal(|ui| {
                                                 if ui.button(&recipe.name).clicked() {
-                                                    self.load_recipe_into_form(recipe_id.clone());
+                                                    self.request(FormAction::LoadRecipe(
+                                                        recipe_id.clone(),
+                                                    ));
                                                 }
                                                 if !recipe.prep_minutes.is_empty() {
                                                     ui.label(format!(
@@ -1656,5 +1750,68 @@ mod tests {
             crate::db::list_recipes(&pool).await.unwrap()[0].name,
             "Stew"
         );
+    }
+
+    /// `App` runs its own runtimes, so it must be built outside of one.
+    fn test_app() -> (tokio::runtime::Runtime, App) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let pool = runtime.block_on(crate::db::open_test_db());
+        (runtime, App::new(std::sync::Arc::new(pool), Vec::new()))
+    }
+
+    #[test]
+    fn actions_run_immediately_without_unsaved_changes() {
+        let (_runtime, mut app) = test_app();
+        app.request(super::FormAction::ExportLatex);
+
+        assert!(app.pending_action.is_none());
+        assert!(app.show_latex_export);
+    }
+
+    #[test]
+    fn unsaved_changes_hold_action_until_discarded() {
+        let (_runtime, mut app) = test_app();
+        app.recipe.name = "Draft".to_string();
+        app.request(super::FormAction::ExportLatex);
+
+        assert_eq!(app.pending_action, Some(super::FormAction::ExportLatex));
+        assert!(!app.show_latex_export);
+
+        app.discard_pending_action();
+
+        assert!(app.pending_action.is_none());
+        assert!(app.show_latex_export);
+        assert_eq!(app.recipe.name, "");
+        assert!(!app.has_unsaved_changes());
+    }
+
+    #[test]
+    fn saving_pending_action_stores_recipe_then_runs_action() {
+        let (_runtime, mut app) = test_app();
+        app.recipe.name = "Soup".to_string();
+        app.recipe.groups[0].ingredients[0].description = "water".to_string();
+        app.recipe.steps[0].instruction = "Boil.".to_string();
+        app.request(super::FormAction::NewRecipe);
+
+        app.save_pending_action();
+
+        assert!(app.pending_action.is_none());
+        assert_eq!(app.recipe.name, "");
+        assert!(app.selected_recipe_id.is_none());
+        assert_eq!(app.recipes.len(), 1);
+        assert_eq!(app.recipes[0].name, "Soup");
+    }
+
+    #[test]
+    fn failed_save_keeps_changes_and_skips_action() {
+        let (_runtime, mut app) = test_app();
+        app.recipe.name = "No ingredients".to_string();
+        app.request(super::FormAction::NewRecipe);
+
+        app.save_pending_action();
+
+        assert!(app.pending_action.is_none());
+        assert_eq!(app.recipe.name, "No ingredients");
+        assert!(app.has_unsaved_changes());
     }
 }
