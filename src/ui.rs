@@ -1129,7 +1129,10 @@ impl eframe::App for App {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.heading("PlaTex");
-                    ui.label("Local recipe editor");
+                    ui.label(format!(
+                        "Local recipe editor · v{}",
+                        env!("CARGO_PKG_VERSION")
+                    ));
                     ui.separator();
 
                     ui.horizontal(|ui| {
