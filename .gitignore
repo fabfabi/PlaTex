@@ -1,5 +1,6 @@
 # ignore standards
 /target
+/release
 settings.json
 recipes.db
 *.tex

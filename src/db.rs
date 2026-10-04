@@ -47,10 +47,12 @@ async fn take_legacy_integer_tags(
     } else {
         "0"
     };
-    let tags =
-        sqlx::query_as::<_, LegacyTag>(&format!("SELECT id, name, {kind}, {sort_order} FROM tags"))
-            .fetch_all(pool)
-            .await?;
+    // `kind` and `sort_order` are fixed column names or literals from above.
+    let tags = sqlx::query_as::<_, LegacyTag>(sqlx::AssertSqlSafe(format!(
+        "SELECT id, name, {kind}, {sort_order} FROM tags"
+    )))
+    .fetch_all(pool)
+    .await?;
 
     let has_links = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'recipe_tags'",
@@ -204,10 +206,13 @@ pub async fn list_recipes(pool: &SqlitePool) -> Result<Vec<Recipe>, sqlx::Error>
 /// Deletes a recipe together with its ingredients, steps and tag links.
 pub async fn delete_recipe(pool: &SqlitePool, recipe_id: &str) -> Result<(), sqlx::Error> {
     for table in ["recipe_tags", "ingredients", "steps"] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE recipe_id = ?"))
-            .bind(recipe_id)
-            .execute(pool)
-            .await?;
+        // `table` comes from the fixed list above.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE recipe_id = ?"
+        )))
+        .bind(recipe_id)
+        .execute(pool)
+        .await?;
     }
     sqlx::query("DELETE FROM recipes WHERE id = ?")
         .bind(recipe_id)
