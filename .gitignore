@@ -1,9 +1,11 @@
+# ignore standards
 /target
 settings.json
 recipes.db
 *.tex
 *.json
 *.odt
+*.zip
 
 # style templates
 *.sty
@@ -16,3 +18,9 @@ recipes.db
 
 # Rezepte
 !rezepte/rezepte_import.json
+
+# ignore icons
+*.png
+*.jpg
+!icon/*.png
+!icon/*.jpg

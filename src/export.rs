@@ -53,11 +53,15 @@ pub fn escape_latex(text: &str) -> String {
     escaped
 }
 
-/// File-name friendly key of a content tag, used to look up `icons/<key>.png`.
-fn icon_key(tag_name: &str) -> String {
-    tag_name
+/// File-name friendly key of a chapter; the reference template loads `icon/symbol_<key>.png`.
+fn icon_key(chapter_name: &str) -> String {
+    chapter_name
         .trim()
         .to_lowercase()
+        .replace('ä', "ae")
+        .replace('ö', "oe")
+        .replace('ü', "ue")
+        .replace('ß', "ss")
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
@@ -76,15 +80,11 @@ fn optional_number(value: Option<i64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
-/// Renders one recipe as a `Rezept` environment (see `templates/platex.sty`).
-pub fn render_recipe(detail: &RecipeDetail) -> String {
+/// Renders one recipe as a `Rezept` environment (see `templates/platex.sty`),
+/// showing the icon of the chapter it is rendered in.
+pub fn render_recipe(detail: &RecipeDetail, chapter_name: &str) -> String {
     let recipe = &detail.recipe;
-    let icon = detail
-        .tags
-        .iter()
-        .find(|tag| tag.kind == TagKind::Content)
-        .map(|tag| icon_key(&tag.name))
-        .unwrap_or_default();
+    let icon = icon_key(chapter_name);
 
     let mut out = String::new();
     writeln!(
@@ -216,7 +216,7 @@ pub fn render_cookbook(recipes: &[RecipeDetail]) -> String {
             .filter(|detail| has_chapter(detail, Some(&chapter.id)))
         {
             writeln!(out).unwrap();
-            out.push_str(&render_recipe(detail));
+            out.push_str(&render_recipe(detail, &chapter.name));
         }
     }
 
@@ -229,7 +229,7 @@ pub fn render_cookbook(recipes: &[RecipeDetail]) -> String {
         writeln!(out, r"\Kapitel{{{}}}", OTHER_CHAPTER_NAME).unwrap();
         for detail in without_chapter {
             writeln!(out).unwrap();
-            out.push_str(&render_recipe(detail));
+            out.push_str(&render_recipe(detail, OTHER_CHAPTER_NAME));
         }
     }
 
@@ -328,7 +328,7 @@ mod tests {
         ];
         detail.steps = vec![step("Kochen.", false), step("Garnieren.", true)];
 
-        let expected = r"\begin{Rezept}{Pasta \& Sauce}{vegan}
+        let expected = r"\begin{Rezept}{Pasta \& Sauce}{mains}
   \RezeptInfo{2}{}{15}
   \Beschreibung{Quick}
   \begin{Zutaten}
@@ -346,13 +346,38 @@ mod tests {
   \end{Zubereitung}
 \end{Rezept}
 ";
-        assert_eq!(render_recipe(&detail), expected);
+        assert_eq!(render_recipe(&detail, "Mains"), expected);
     }
 
     #[test]
     fn render_recipe_omits_empty_sections() {
-        let rendered = render_recipe(&recipe("Toast", vec![]));
+        let rendered = render_recipe(&recipe("Toast", vec![]), "");
         assert_eq!(rendered, "\\begin{Rezept}{Toast}{}\n\\end{Rezept}\n");
+    }
+
+    #[test]
+    fn icon_key_transliterates_umlauts() {
+        assert_eq!(icon_key(" Soße "), "sosse");
+        assert_eq!(icon_key("Gemüse & Öl"), "gemueseoel");
+        assert_eq!(icon_key("Tex-Mex"), "tex-mex");
+    }
+
+    #[test]
+    fn recipe_in_several_chapters_gets_each_chapter_icon() {
+        let rendered = render_cookbook(&[
+            recipe(
+                "Eintopf",
+                vec![
+                    tag("c1", "Suppen", TagKind::Chapter, 0),
+                    tag("c2", "Hauptgerichte", TagKind::Chapter, 1),
+                    tag("t1", "Vegan", TagKind::Content, 0),
+                ],
+            ),
+            recipe("Brot", vec![]),
+        ]);
+        assert!(rendered.contains(r"\begin{Rezept}{Eintopf}{suppen}"));
+        assert!(rendered.contains(r"\begin{Rezept}{Eintopf}{hauptgerichte}"));
+        assert!(rendered.contains(r"\begin{Rezept}{Brot}{sonstige}"));
     }
 
     #[test]

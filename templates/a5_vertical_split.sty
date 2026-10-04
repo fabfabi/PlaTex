@@ -5,8 +5,7 @@
 % the macros defined here; every template must define all of them.
 %
 %   \Kapitel{name}                       chapter divider page
-%   \begin{Rezept}{title}{icon} ...      one recipe per page;
-%                                        icon file: icons/<icon>.png
+%   \begin{Rezept}{title}{icon} ...      one recipe per page; icon = chapter key
 %   \RezeptInfo{servings}{prep}{cook}    any argument may be empty
 %   \Beschreibung{text}
 %   \begin{Zutaten} ... \end{Zutaten}    left column
@@ -14,6 +13,17 @@
 %   \Zutat{qty}{name}, \OptionaleZutat{qty}{name}
 %   \begin{Zubereitung} ...              right column
 %   \Schritt{text}, \OptionalerSchritt{text}
+%
+% Chapter symbols
+%   Each recipe shows the symbol of the chapter it is printed in, left of the
+%   recipe title. It is loaded from icon/symbol_<chapter>.png, or .jpg if no
+%   .png exists, relative to the .tex file. <chapter> is the chapter name in
+%   lowercase with umlauts transliterated and everything but letters, digits
+%   and "-" removed:
+%     Pasta    -> icon/symbol_pasta.png   (or .jpg)
+%     Soße     -> icon/symbol_sosse.png   (or .jpg)
+%     Sonstige -> icon/symbol_sonstige.png (or .jpg; recipes without a chapter)
+%   Without such a file no symbol is shown and the title uses the full width.
 % ------------------------------------------------------------
 \NeedsTeXFormat{LaTeX2e}
 \ProvidesPackage{platex}
@@ -47,7 +57,6 @@
 \RequirePackage{graphicx}
 \RequirePackage{tabularx}
 \RequirePackage{array}
-\RequirePackage{tikz}
 
 % ------------------------------------------------------------
 % SEITENSTIL
@@ -88,41 +97,44 @@
 % ------------------------------------------------------------
 % REZEPT
 % ------------------------------------------------------------
+% Recipe title, scaled to the width of the surrounding box
+\newcommand{\PlaTexTitel}[1]{%
+    \resizebox{\linewidth}{!}{%
+        {\fontsize{25}{28}\selectfont
+        \bfseries
+        \color{kochgruen}
+        #1}%
+    }%
+}
+
+% Sets \PlaTexSymbol to icon/symbol_<key>.png or .jpg, or empty if neither exists
+\newcommand{\PlaTexFindeSymbol}[1]{%
+    \IfFileExists{icon/symbol_#1.png}{\def\PlaTexSymbol{icon/symbol_#1.png}}{%
+        \IfFileExists{icon/symbol_#1.jpg}{\def\PlaTexSymbol{icon/symbol_#1.jpg}}{%
+            \def\PlaTexSymbol{}}}%
+}
+
 \newenvironment{Rezept}[2]{%
     \clearpage
     \noindent
-    \begin{minipage}[c]{0.86\textwidth}
-        \resizebox{\linewidth}{!}{%
-            {\fontsize{25}{28}\selectfont
-            \bfseries
-            \color{kochgruen}
-            #1}%
-        }
-    \end{minipage}
-    \hfill
-    \begin{minipage}[c]{0.10\textwidth}
-        \centering
-        \IfFileExists{icons/#2.png}{%
+    % Chapter symbol left of the title; without a symbol file the title
+    % uses the full width.
+    \PlaTexFindeSymbol{#2}%
+    \expandafter\PlaTexIfEmpty\expandafter{\PlaTexSymbol}{%
+        \PlaTexTitel{#1}%
+    }{%
+        \begin{minipage}[c]{0.10\textwidth}
             \includegraphics[
                 width=9mm,
                 height=9mm,
                 keepaspectratio
-            ]{icons/#2.png}%
-        }{%
-            \begin{tikzpicture}
-                \draw[
-                    kochgruen,
-                    line width=0.7pt
-                ]
-                (0,0) circle (4mm);
-
-                \node[
-                    text=kochgruen,
-                    font=\small\bfseries
-                ] at (0,0) {?};
-            \end{tikzpicture}%
-        }
-    \end{minipage}
+            ]{\PlaTexSymbol}%
+        \end{minipage}%
+        \hfill
+        \begin{minipage}[c]{0.86\textwidth}
+            \PlaTexTitel{#1}%
+        \end{minipage}%
+    }
 
     \vspace{3mm}
 
