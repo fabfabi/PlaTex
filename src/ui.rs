@@ -1119,12 +1119,13 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.show_latex_export_window(ctx);
-        self.show_delete_confirmation(ctx);
-        self.show_unsaved_changes_dialog(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.show_latex_export_window(&ctx);
+        self.show_delete_confirmation(&ctx);
+        self.show_unsaved_changes_dialog(&ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
